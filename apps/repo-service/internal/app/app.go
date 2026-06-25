@@ -9,6 +9,7 @@ import (
 
 	serviceconfig "codeatlas/apps/repo-service/internal/config"
 	httpapi "codeatlas/apps/repo-service/internal/http"
+	"codeatlas/apps/repo-service/internal/integrations"
 	"codeatlas/apps/repo-service/internal/repository"
 	"codeatlas/packages/database"
 	"codeatlas/packages/logger"
@@ -40,10 +41,12 @@ func New(ctx context.Context, cfg serviceconfig.Config) (*App, error) {
 	}
 
 	repositoryRepo := repository.NewRepositoryRepository(dbPool)
+	installationRepo := repository.NewInstallationRepository(dbPool)
 	tokenManager := httpapi.NewTokenManager(cfg.JWTSecret)
+	githubApp := integrations.NewGitHubApp(cfg.GitHubAppSlug)
 
 	mux := http.NewServeMux()
-	handler := httpapi.NewHandler(log, repositoryRepo, tokenManager)
+	handler := httpapi.NewHandler(cfg, log, repositoryRepo, installationRepo, tokenManager, githubApp)
 	handler.Register(mux)
 
 	server := &http.Server{

@@ -4,23 +4,39 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
+	serviceconfig "codeatlas/apps/repo-service/internal/config"
+	"codeatlas/apps/repo-service/internal/integrations"
 	"codeatlas/apps/repo-service/internal/repos"
 	"codeatlas/apps/repo-service/internal/repository"
 )
 
 type Handler struct {
-	logger         *slog.Logger
-	repositoryRepo *repository.RepositoryRepository
-	tokenManager   *TokenManager
+	config           serviceconfig.Config
+	logger           *slog.Logger
+	repositoryRepo   *repository.RepositoryRepository
+	installationRepo *repository.InstallationRepository
+	tokenManager     *TokenManager
+	githubApp        *integrations.GitHubApp
 }
 
-func NewHandler(logger *slog.Logger, repositoryRepo *repository.RepositoryRepository, tokenManager *TokenManager) *Handler {
+func NewHandler(
+	config serviceconfig.Config,
+	logger *slog.Logger,
+	repositoryRepo *repository.RepositoryRepository,
+	installationRepo *repository.InstallationRepository,
+	tokenManager *TokenManager,
+	githubApp *integrations.GitHubApp,
+) *Handler {
 	return &Handler{
-		logger:         logger,
-		repositoryRepo: repositoryRepo,
-		tokenManager:   tokenManager,
+		config:           config,
+		logger:           logger,
+		repositoryRepo:   repositoryRepo,
+		installationRepo: installationRepo,
+		tokenManager:     tokenManager,
+		githubApp:        githubApp,
 	}
 }
 
@@ -32,6 +48,147 @@ func (h *Handler) Register(mux *http.ServeMux) {
 
 	mux.Handle("/repos", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleRepositories)))
 	mux.Handle("/repos/", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleRepositoryByID)))
+	mux.Handle("/integrations/github/install", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleGitHubInstallURL)))
+	mux.HandleFunc("/integrations/github/setup", h.handleGitHubSetup)
+	mux.Handle("/integrations/github/installations/claim", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleClaimInstallation)))
+}
+
+type claimInstallationRequest struct {
+	InstallationID int64 `json:"installation_id"`
+}
+
+func (h *Handler) handleGitHubInstallURL(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	installURL, err := h.githubApp.InstallationURL()
+	if err != nil {
+		h.logger.Error("build github app installation url", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "github app slug is not configured",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"install_url": installURL,
+	})
+}
+
+func (h *Handler) handleGitHubSetup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	installationIDValue := strings.TrimSpace(r.URL.Query().Get("installation_id"))
+	if installationIDValue == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "missing installation_id",
+		})
+		return
+	}
+
+	installationID, err := parseInt64(installationIDValue)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid installation_id",
+		})
+		return
+	}
+
+	var setupAction *string
+	if value := strings.TrimSpace(r.URL.Query().Get("setup_action")); value != "" {
+		setupAction = &value
+	}
+
+	installation, err := h.installationRepo.UpsertFromSetupCallback(r.Context(), installationID, setupAction)
+	if err != nil {
+		h.logger.Error("upsert installation from setup callback", "error", err, "installation_id", installationID)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to record installation callback",
+		})
+		return
+	}
+
+	if strings.TrimSpace(h.config.FrontendGitHubSetupRedirectURL) != "" {
+		redirectURL, err := url.Parse(h.config.FrontendGitHubSetupRedirectURL)
+		if err != nil {
+			h.logger.Error("parse frontend github setup redirect url", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "invalid frontend setup redirect configuration",
+			})
+			return
+		}
+
+		query := redirectURL.Query()
+		query.Set("installation_id", installationIDValue)
+		if setupAction != nil {
+			query.Set("setup_action", *setupAction)
+		}
+		redirectURL.RawQuery = query.Encode()
+
+		http.Redirect(w, r, redirectURL.String(), http.StatusTemporaryRedirect)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"installation": installation,
+	})
+}
+
+func (h *Handler) handleClaimInstallation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	userID, ok := CurrentUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "user not found in token",
+		})
+		return
+	}
+
+	var payload claimInstallationRequest
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid request body",
+		})
+		return
+	}
+
+	if payload.InstallationID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "installation_id is required",
+		})
+		return
+	}
+
+	installation, err := h.installationRepo.ClaimInstallation(r.Context(), payload.InstallationID, userID)
+	if err != nil {
+		h.logger.Error("claim installation", "error", err, "installation_id", payload.InstallationID, "user_id", userID)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to claim installation",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"installation": installation,
+	})
 }
 
 func (h *Handler) handleRepositories(w http.ResponseWriter, r *http.Request) {

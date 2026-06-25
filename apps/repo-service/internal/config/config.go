@@ -7,14 +7,16 @@ import (
 )
 
 type Config struct {
-	ServiceName     string
-	AppEnv          string
-	LogLevel        string
-	LogJSON         bool
-	HTTPPort        int
-	ShutdownTimeout time.Duration
-	FrontendOrigin  string
-	JWTSecret       string
+	ServiceName                    string
+	AppEnv                         string
+	LogLevel                       string
+	LogJSON                        bool
+	HTTPPort                       int
+	ShutdownTimeout                time.Duration
+	FrontendOrigin                 string
+	FrontendGitHubSetupRedirectURL string
+	JWTSecret                      string
+	GitHubAppSlug                  string
 }
 
 func Load() (Config, error) {
@@ -39,13 +41,15 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		ServiceName:     "repo-service",
-		AppEnv:          sharedconfig.GetString("APP_ENV", "development"),
-		LogLevel:        sharedconfig.GetString("LOG_LEVEL", "info"),
-		LogJSON:         logJSON,
-		HTTPPort:        httpPort,
-		ShutdownTimeout: shutdownTimeout,
-		FrontendOrigin:  sharedconfig.GetString("FRONTEND_ORIGIN", "http://localhost:6060"),
-		JWTSecret:       jwtSecret,
+		ServiceName:                    "repo-service",
+		AppEnv:                         sharedconfig.GetString("APP_ENV", "development"),
+		LogLevel:                       sharedconfig.GetString("LOG_LEVEL", "info"),
+		LogJSON:                        logJSON,
+		HTTPPort:                       httpPort,
+		ShutdownTimeout:                shutdownTimeout,
+		FrontendOrigin:                 sharedconfig.GetString("FRONTEND_ORIGIN", "http://localhost:6060"),
+		FrontendGitHubSetupRedirectURL: sharedconfig.GetString("FRONTEND_GITHUB_SETUP_REDIRECT_URL", "http://localhost:6060/github/installations/callback"),
+		JWTSecret:                      jwtSecret,
+		GitHubAppSlug:                  sharedconfig.GetString("GITHUB_APP_SLUG", ""),
 	}, nil
 }
