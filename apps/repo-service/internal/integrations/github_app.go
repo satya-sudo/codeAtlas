@@ -1,23 +1,62 @@
 package integrations
 
 import (
+	"context"
 	"fmt"
-	"net/url"
-	"strings"
+	"time"
+
+	sharedgithub "codeatlas/packages/github"
 )
 
-type GitHubApp struct {
-	slug string
+type GitHubAppConfig struct {
+	Slug           string
+	AppID          int64
+	ClientID       string
+	PrivateKeyPath string
+	APIBaseURL     string
 }
 
-func NewGitHubApp(slug string) *GitHubApp {
-	return &GitHubApp{slug: strings.TrimSpace(slug)}
+type GitHubApp struct {
+	client *sharedgithub.AppClient
+}
+
+func NewGitHubApp(cfg GitHubAppConfig) (*GitHubApp, error) {
+	client, err := sharedgithub.NewAppClient(sharedgithub.AppClientConfig{
+		Slug:           cfg.Slug,
+		AppID:          cfg.AppID,
+		ClientID:       cfg.ClientID,
+		PrivateKeyPath: cfg.PrivateKeyPath,
+		APIBaseURL:     cfg.APIBaseURL,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &GitHubApp{client: client}, nil
 }
 
 func (g *GitHubApp) InstallationURL() (string, error) {
-	if g.slug == "" {
-		return "", fmt.Errorf("github app slug is not configured")
+	return g.client.InstallationURL()
+}
+
+func (g *GitHubApp) GenerateAppJWT() (string, error) {
+	return g.client.GenerateAppJWT(time.Now().UTC())
+}
+
+func (g *GitHubApp) CreateInstallationToken(ctx context.Context, installationID int64) (sharedgithub.InstallationToken, error) {
+	token, err := g.client.CreateInstallationToken(ctx, installationID)
+	if err != nil {
+		return sharedgithub.InstallationToken{}, fmt.Errorf("create installation token: %w", err)
 	}
 
-	return fmt.Sprintf("https://github.com/apps/%s/installations/new", url.PathEscape(g.slug)), nil
+	return token, nil
+}
+
+func (g *GitHubApp) ListInstallationRepositories(ctx context.Context, installationID int64) ([]sharedgithub.InstallationRepository, error) {
+	repositories, err := g.client.ListInstallationRepositories(ctx, installationID)
+	if err != nil {
+		return nil, fmt.Errorf("list installation repositories: %w", err)
+	}
+
+	return repositories, nil
 }

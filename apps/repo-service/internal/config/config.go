@@ -17,6 +17,10 @@ type Config struct {
 	FrontendGitHubSetupRedirectURL string
 	JWTSecret                      string
 	GitHubAppSlug                  string
+	GitHubAppID                    int64
+	GitHubAppClientID              string
+	GitHubAppPrivateKeyPath        string
+	GitHubAPIBaseURL               string
 }
 
 func Load() (Config, error) {
@@ -40,6 +44,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	githubAppID, err := sharedconfig.GetInt("GITHUB_APP_ID", 0)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		ServiceName:                    "repo-service",
 		AppEnv:                         sharedconfig.GetString("APP_ENV", "development"),
@@ -51,5 +60,9 @@ func Load() (Config, error) {
 		FrontendGitHubSetupRedirectURL: sharedconfig.GetString("FRONTEND_GITHUB_SETUP_REDIRECT_URL", "http://localhost:6060/github/installations/callback"),
 		JWTSecret:                      jwtSecret,
 		GitHubAppSlug:                  sharedconfig.GetString("GITHUB_APP_SLUG", ""),
+		GitHubAppID:                    int64(githubAppID),
+		GitHubAppClientID:              sharedconfig.GetString("GITHUB_APP_CLIENT_ID", ""),
+		GitHubAppPrivateKeyPath:        sharedconfig.GetString("GITHUB_APP_PRIVATE_KEY_PATH", ""),
+		GitHubAPIBaseURL:               sharedconfig.GetString("GITHUB_API_BASE_URL", "https://api.github.com"),
 	}, nil
 }

@@ -8,17 +8,6 @@ const CONFIG = {
   tokenStorageKey: "codeatlas.auth.token"
 };
 
-const futureHotspots = [
-  { path: "/auth/session.go", level: "High churn" },
-  { path: "/db/schema.sql", level: "High churn" },
-  { path: "/api/v1/user.ts", level: "Medium activity" }
-];
-
-const futureCoverage = [
-  { label: "Core Engine", value: 72, tone: "primary" },
-  { label: "UI Components", value: 45, tone: "secondary" }
-];
-
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem(CONFIG.tokenStorageKey) || "");
   const [user, setUser] = useState(null);
@@ -31,6 +20,15 @@ function App() {
     error: "",
     claimedInstallation: null
   });
+  const [installations, setInstallations] = useState([]);
+  const [installationsStatus, setInstallationsStatus] = useState("idle");
+  const [installationsError, setInstallationsError] = useState("");
+  const [selectedInstallationId, setSelectedInstallationId] = useState("");
+  const [repositories, setRepositories] = useState([]);
+  const [repositoriesStatus, setRepositoriesStatus] = useState("idle");
+  const [repositoriesError, setRepositoriesError] = useState("");
+  const [repositorySearch, setRepositorySearch] = useState("");
+  const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
 
   useEffect(() => {
     const currentUrl = new URL(window.location.href);
@@ -88,9 +86,7 @@ function App() {
         if (response.status === 401) {
           localStorage.removeItem(CONFIG.tokenStorageKey);
           if (!cancelled) {
-            setToken("");
-            setUser(null);
-            setAuthError("Session expired. Sign in again.");
+            resetSession("Session expired. Sign in again.");
           }
           return;
         }
@@ -153,9 +149,7 @@ function App() {
         if (response.status === 401) {
           localStorage.removeItem(CONFIG.tokenStorageKey);
           if (!cancelled) {
-            setToken("");
-            setUser(null);
-            setAuthError("Session expired before installation claim. Sign in again.");
+            resetSession("Session expired before installation claim. Sign in again.");
             setInstallationState((current) => ({
               ...current,
               status: "failed",
@@ -177,6 +171,7 @@ function App() {
             claimedInstallation: payload.installation,
             error: ""
           }));
+          setSelectedInstallationId(String(payload.installation.installation_id));
           setToast("GitHub App installation linked.");
         }
       } catch (error) {
@@ -199,6 +194,132 @@ function App() {
   }, [token, installationState.installationId, installationState.status]);
 
   useEffect(() => {
+    if (!token || !user) {
+      setInstallations([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadInstallations() {
+      setInstallationsStatus("loading");
+      setInstallationsError("");
+
+      try {
+        const response = await fetch(`${CONFIG.repoBaseUrl}/integrations/github/installations`, {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
+
+        if (response.status === 401) {
+          localStorage.removeItem(CONFIG.tokenStorageKey);
+          if (!cancelled) {
+            resetSession("Session expired. Sign in again.");
+          }
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error(`list installations failed with status ${response.status}`);
+        }
+
+        const payload = await response.json();
+        if (!cancelled) {
+          const items = payload.installations || [];
+          setInstallations(items);
+          setInstallationsStatus("ready");
+          setInstallationsError("");
+
+          setSelectedInstallationId((current) => {
+            if (current && items.some((item) => String(item.installation_id) === current)) {
+              return current;
+            }
+            if (installationState.installationId && items.some((item) => String(item.installation_id) === installationState.installationId)) {
+              return installationState.installationId;
+            }
+            return items.length > 0 ? String(items[0].installation_id) : "";
+          });
+        }
+      } catch (error) {
+        console.error(error);
+        if (!cancelled) {
+          setInstallations([]);
+          setInstallationsStatus("failed");
+          setInstallationsError("Could not load GitHub installations.");
+        }
+      }
+    }
+
+    loadInstallations();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, user, installationState.installationId]);
+
+  useEffect(() => {
+    if (!token || !selectedInstallationId) {
+      setRepositories([]);
+      setRepositoriesStatus("idle");
+      setRepositoriesError("");
+      setSelectedRepositoryId("");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadRepositories() {
+      setRepositoriesStatus("loading");
+      setRepositoriesError("");
+      setSelectedRepositoryId("");
+
+      try {
+        const response = await fetch(
+          `${CONFIG.repoBaseUrl}/integrations/github/installations/${selectedInstallationId}/repositories`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`
+            }
+          }
+        );
+
+        if (response.status === 401) {
+          localStorage.removeItem(CONFIG.tokenStorageKey);
+          if (!cancelled) {
+            resetSession("Session expired. Sign in again.");
+          }
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error(`list repositories failed with status ${response.status}`);
+        }
+
+        const payload = await response.json();
+        if (!cancelled) {
+          setRepositories(payload.repositories || []);
+          setRepositoriesStatus("ready");
+          setRepositoriesError("");
+        }
+      } catch (error) {
+        console.error(error);
+        if (!cancelled) {
+          setRepositories([]);
+          setRepositoriesStatus("failed");
+          setRepositoriesError("Could not load repositories for this installation.");
+        }
+      }
+    }
+
+    loadRepositories();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, selectedInstallationId]);
+
+  useEffect(() => {
     if (!toast) {
       return undefined;
     }
@@ -210,13 +331,48 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const installStatus = useMemo(() => getInstallationStatusCopy(installationState), [installationState]);
+  const selectedInstallation = useMemo(
+    () => installations.find((item) => String(item.installation_id) === selectedInstallationId) || null,
+    [installations, selectedInstallationId]
+  );
+
+  const filteredRepositories = useMemo(() => {
+    const query = repositorySearch.trim().toLowerCase();
+    if (!query) {
+      return repositories;
+    }
+
+    return repositories.filter((item) => {
+      const fullName = item.full_name?.toLowerCase() || "";
+      const name = item.name?.toLowerCase() || "";
+      const owner = item.owner?.login?.toLowerCase() || "";
+      return fullName.includes(query) || name.includes(query) || owner.includes(query);
+    });
+  }, [repositories, repositorySearch]);
+
+  const selectedRepository = useMemo(
+    () => repositories.find((item) => String(item.id) === selectedRepositoryId) || null,
+    [repositories, selectedRepositoryId]
+  );
+
+  const setupSummary = useMemo(() => getSetupSummary(user, installations, selectedInstallation, selectedRepository), [user, installations, selectedInstallation, selectedRepository]);
+
+  function resetSession(message) {
+    setToken("");
+    setUser(null);
+    setAuthError(message);
+    setInstallations([]);
+    setRepositories([]);
+    setSelectedInstallationId("");
+    setSelectedRepositoryId("");
+  }
 
   const handleLogout = () => {
     localStorage.removeItem(CONFIG.tokenStorageKey);
     setToken("");
     setUser(null);
     setAuthError("");
+    setToast("Signed out.");
     setInstallationState({
       installationId: "",
       setupAction: "",
@@ -224,7 +380,10 @@ function App() {
       error: "",
       claimedInstallation: null
     });
-    setToast("Signed out.");
+    setInstallations([]);
+    setRepositories([]);
+    setSelectedInstallationId("");
+    setSelectedRepositoryId("");
   };
 
   const handleInstallGitHubApp = async () => {
@@ -248,9 +407,7 @@ function App() {
 
       if (response.status === 401) {
         localStorage.removeItem(CONFIG.tokenStorageKey);
-        setToken("");
-        setUser(null);
-        setAuthError("Session expired. Sign in again before installing the GitHub App.");
+        resetSession("Session expired. Sign in again before installing the GitHub App.");
         return;
       }
 
@@ -268,6 +425,13 @@ function App() {
         error: "Could not start the GitHub App installation flow."
       }));
     }
+  };
+
+  const handleRepositoryConnect = () => {
+    if (!selectedRepository) {
+      return;
+    }
+    setToast(`Repository connect endpoint is next. Selected ${selectedRepository.full_name}.`);
   };
 
   if (!user) {
@@ -317,193 +481,182 @@ function App() {
 
   return (
     <>
-      <div className="onboarding-page">
-        <header className="onboarding-topbar">
+      <div className="app-shell">
+        <header className="topbar">
           <div className="topbar-brand">
-            <div className="brand-copy">
-              <strong>CodeAtlas</strong>
-              <span>Engineering Intelligence</span>
-            </div>
+            <strong>CodeAtlas</strong>
+            <span>Engineering Intelligence</span>
           </div>
 
-          <div className="topbar-right">
-            <div className="system-pill">
-              <span className="system-dot" />
-              <span>Status: Operational</span>
+          <div className="topbar-user">
+            <div className="avatar-shell">
+              {user.avatar_url ? <img src={user.avatar_url} alt={user.username} /> : <span>{user.username.slice(0, 1).toUpperCase()}</span>}
             </div>
-
-            <div className="user-chip">
-              <div className="avatar-shell">
-                {user.avatar_url ? <img src={user.avatar_url} alt={user.username} /> : <span>{user.username.slice(0, 1).toUpperCase()}</span>}
-              </div>
-              <div className="user-chip-copy">
-                <strong>{user.username}</strong>
-                <button type="button" className="link-button" onClick={handleLogout}>
-                  Sign out
-                </button>
-              </div>
+            <div className="topbar-user-copy">
+              <strong>{user.username}</strong>
+              <button type="button" className="link-button" onClick={handleLogout}>
+                Sign out
+              </button>
             </div>
           </div>
         </header>
 
-        <main className="onboarding-main">
-          <section className="hero-section">
-            <h1>Unlock deep codebase intelligence</h1>
-            <p>
-              Connect your GitHub account and install the CodeAtlas GitHub App to map ownership, identify hotspots, and prepare repository syncing for engineering insights.
-            </p>
-
-            <div className="hero-actions">
-              <a className="button button-muted button-static" href={`${CONFIG.authBaseUrl}/auth/github/login`} aria-disabled="true">
-                Signed in with GitHub
-              </a>
-              <button type="button" className="button button-primary" onClick={handleInstallGitHubApp}>
-                Install GitHub App
-              </button>
-            </div>
+        <main className="page-body">
+          <section className="page-intro">
+            <h1>Connect a repository</h1>
+            <p>Choose a GitHub installation, then select the repository you want to sync into CodeAtlas.</p>
           </section>
 
-          <section className="flow-strip">
-            <FlowStep label="Sign in" meta="Done" state="done" />
-            <FlowStep label="Install App" meta={installationState.status === "idle" ? "Active" : installationState.status === "requesting-install-url" ? "Starting" : "Done"} state={installationState.status === "idle" || installationState.status === "requesting-install-url" ? "active" : "done"} />
-            <FlowStep label="Return" meta={installationState.installationId ? "Done" : "Next"} state={installationState.installationId ? "done" : "idle"} />
-            <FlowStep label="Claim" meta={installationState.status === "claimed" ? "Done" : installationState.status === "claiming" ? "Active" : "Wait"} state={installationState.status === "claimed" ? "done" : installationState.status === "claiming" ? "active" : "idle"} />
-            <FlowStep label="Sync" meta="Final" state="idle" />
-          </section>
-
-          <section className="content-grid">
-            <div className="panel setup-panel">
-              <div className="panel-head">
-                <h2>Setup Progress</h2>
-                <span className={`status-badge status-${mapBadgeTone(installationState.status)}`}>
-                  {installationState.status === "claimed" ? "LINKED" : installationState.status === "failed" ? "FAILED" : "IN PROGRESS"}
-                </span>
+          <section className="summary-strip">
+            {setupSummary.map((item) => (
+              <div className={`summary-step state-${item.state}`} key={item.label}>
+                <span className="summary-dot" />
+                <div>
+                  <strong>{item.label}</strong>
+                  <span>{item.meta}</span>
+                </div>
               </div>
-
-              <div className="setup-list">
-                <SetupRow
-                  tone="done"
-                  title="Auth Status"
-                  detail={`Session active as ${user.username}`}
-                />
-
-                <SetupRow
-                  tone={installationState.status === "idle" ? "active" : installationState.status === "failed" ? "error" : "done"}
-                  title="App Installation"
-                  detail={installationState.status === "idle" ? "Install the GitHub App on the repositories or organization you want CodeAtlas to read." : installStatus.detail}
-                  action={
-                    installationState.status === "idle" ? (
-                      <button type="button" className="button button-primary button-small" onClick={handleInstallGitHubApp}>
-                        Start Install
-                      </button>
-                    ) : null
-                  }
-                />
-
-                <SetupRow
-                  tone={installationState.installationId ? "done" : "pending"}
-                  title="Installation Link"
-                  detail={
-                    installationState.installationId
-                      ? `Installation ${installationState.installationId} returned from GitHub and is being attached to your account.`
-                      : "Waiting for GitHub callback to finalize the mapping process."
-                  }
-                />
-              </div>
-            </div>
-
-            <div className="panel detail-panel">
-              <div className="panel-head">
-                <h2>Installation Details</h2>
-              </div>
-
-              <dl className="detail-grid">
-                <div>
-                  <dt>Target</dt>
-                  <dd>Select organization or repositories on GitHub</dd>
-                </div>
-                <div>
-                  <dt>Permissions</dt>
-                  <dd>Read-only code and metadata</dd>
-                </div>
-                <div>
-                  <dt>Installation ID</dt>
-                  <dd>{installationState.installationId || "Not returned yet"}</dd>
-                </div>
-                <div>
-                  <dt>Setup action</dt>
-                  <dd>{installationState.setupAction || "Waiting for callback"}</dd>
-                </div>
-                <div>
-                  <dt>Linked user</dt>
-                  <dd>
-                    {installationState.claimedInstallation?.installed_by_user_id
-                      ? `User ${installationState.claimedInstallation.installed_by_user_id}`
-                      : "Not linked yet"}
-                  </dd>
-                </div>
-                <div>
-                  <dt>System status</dt>
-                  <dd className={`detail-status tone-${mapBadgeTone(installationState.status)}`}>{installStatus.label}</dd>
-                </div>
-              </dl>
-
-              {installationState.error ? <p className="inline-error">{installationState.error}</p> : null}
-              {authError ? <p className="inline-error">{authError}</p> : null}
-            </div>
+            ))}
           </section>
 
-          <section className="preview-section">
-            <div className="preview-header">
-              <h3>Post-setup preview</h3>
-              <span className="preview-pill">Coming soon</span>
+          <section className="workspace-grid">
+            <div className="workspace-main">
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>GitHub Installations</h2>
+                  <button type="button" className="link-action" onClick={handleInstallGitHubApp}>
+                    Add installation
+                  </button>
+                </div>
+
+                {installationsStatus === "loading" ? <p className="panel-message">Loading installations…</p> : null}
+                {installationsError ? <p className="inline-error">{installationsError}</p> : null}
+
+                {installationsStatus === "ready" && installations.length === 0 ? (
+                  <div className="empty-state">
+                    <strong>No GitHub installations yet</strong>
+                    <p>Install the CodeAtlas GitHub App to start choosing repositories.</p>
+                    <button type="button" className="button button-primary button-small" onClick={handleInstallGitHubApp}>
+                      Install GitHub App
+                    </button>
+                  </div>
+                ) : null}
+
+                {installations.length > 0 ? (
+                  <div className="installation-grid">
+                    {installations.map((item) => {
+                      const isSelected = String(item.installation_id) === selectedInstallationId;
+                      return (
+                        <button
+                          type="button"
+                          key={item.installation_id}
+                          className={`installation-card ${isSelected ? "is-selected" : ""}`}
+                          onClick={() => setSelectedInstallationId(String(item.installation_id))}
+                        >
+                          <div className="installation-icon">{item.account_type === "Organization" ? "ORG" : "APP"}</div>
+                          <div className="installation-copy">
+                            <strong>{item.account_login || `Installation ${item.installation_id}`}</strong>
+                            <span>{item.account_type || "GitHub App installation"}</span>
+                            <em>{item.status === "pending_verification" ? "Connected" : item.status}</em>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="panel">
+                <div className="panel-head panel-head-search">
+                  <h2>Select Repository</h2>
+                  <div className="search-shell">
+                    <input
+                      type="text"
+                      value={repositorySearch}
+                      onChange={(event) => setRepositorySearch(event.target.value)}
+                      placeholder="Search repositories..."
+                    />
+                  </div>
+                </div>
+
+                {!selectedInstallation ? <p className="panel-message">Select an installation to load repositories.</p> : null}
+                {repositoriesStatus === "loading" ? <p className="panel-message">Loading repositories…</p> : null}
+                {repositoriesError ? <p className="inline-error">{repositoriesError}</p> : null}
+
+                {selectedInstallation && repositoriesStatus === "ready" && filteredRepositories.length === 0 ? (
+                  <p className="panel-message">No repositories match the current search.</p>
+                ) : null}
+
+                {filteredRepositories.length > 0 ? (
+                  <div className="repository-list">
+                    {filteredRepositories.map((item) => {
+                      const isSelected = String(item.id) === selectedRepositoryId;
+                      return (
+                        <div className={`repository-row ${isSelected ? "is-selected" : ""}`} key={item.id}>
+                          <div className="repository-meta">
+                            <strong>{item.name}</strong>
+                            <p>{item.full_name}</p>
+                            <div className="repository-tags">
+                              <span>{item.private ? "Private" : "Public"}</span>
+                              <span>{item.default_branch || "Unknown branch"}</span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className={`button ${isSelected ? "button-primary" : "button-secondary"} button-small`}
+                            onClick={() => setSelectedRepositoryId(String(item.id))}
+                          >
+                            {isSelected ? "Selected" : "Select"}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </section>
             </div>
 
-            <div className="preview-grid">
-              <article className="panel preview-card">
-                <div className="preview-card-head">
-                  <span>Repository Health</span>
+            <aside className="workspace-side">
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>Selection Summary</h2>
                 </div>
-                <div className="spark-stack">
-                  <SparkRow label="Churn rate" values={[40, 60, 30, 50, 45]} tone="primary" tag="Low" />
-                  <SparkRow label="Complexity" values={[20, 25, 22, 24, 23]} tone="muted" tag="Stable" />
-                </div>
-              </article>
 
-              <article className="panel preview-card">
-                <div className="preview-card-head">
-                  <span>Hotspot Files</span>
-                </div>
-                <ul className="preview-list">
-                  {futureHotspots.map((item) => (
-                    <li key={item.path}>
-                      <span className="mono">{item.path}</span>
-                      <em>{item.level}</em>
-                    </li>
-                  ))}
-                </ul>
-              </article>
+                <dl className="selection-grid">
+                  <div>
+                    <dt>Installation</dt>
+                    <dd>{selectedInstallation ? selectedInstallation.account_login || `Installation ${selectedInstallation.installation_id}` : "Not selected"}</dd>
+                  </div>
+                  <div>
+                    <dt>Repository</dt>
+                    <dd>{selectedRepository ? selectedRepository.full_name : "Not selected"}</dd>
+                  </div>
+                </dl>
 
-              <article className="panel preview-card">
-                <div className="preview-card-head">
-                  <span>Expertise Map</span>
-                </div>
-                <div className="coverage-list">
-                  {futureCoverage.map((item) => (
-                    <div className="coverage-row" key={item.label}>
-                      <div className="coverage-meta">
-                        <span>{item.label}</span>
-                        <strong>{item.value}% Coverage</strong>
-                      </div>
-                      <div className="coverage-track">
-                        <span className={`coverage-fill tone-${item.tone}`} style={{ width: `${item.value}%` }} />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </article>
-            </div>
+                <button
+                  type="button"
+                  className={`button button-primary button-full ${selectedRepository ? "" : "is-disabled"}`}
+                  disabled={!selectedRepository}
+                  onClick={handleRepositoryConnect}
+                >
+                  Connect repository
+                </button>
+              </section>
+
+              <section className="panel panel-note">
+                <h3>What happens next</h3>
+                <p>
+                  After you connect a repository, CodeAtlas will import commit history and begin ownership, hotspot, and dependency analysis.
+                </p>
+              </section>
+            </aside>
           </section>
+
+          {installationState.error || authError ? (
+            <section className="inline-alert">
+              {installationState.error || authError}
+            </section>
+          ) : null}
         </main>
       </div>
 
@@ -512,99 +665,29 @@ function App() {
   );
 }
 
-function FlowStep({ label, meta, state }) {
-  return (
-    <div className={`flow-step state-${state}`}>
-      <div className="flow-dot">
-        {state === "done" ? "✓" : label === "Install App" && state === "active" ? "2" : label === "Sign in" ? "1" : label === "Return" ? "3" : label === "Claim" ? "4" : "5"}
-      </div>
-      <div className="flow-copy">
-        <strong>{label}</strong>
-        <span>{meta}</span>
-      </div>
-    </div>
-  );
-}
-
-function SetupRow({ action, detail, title, tone }) {
-  return (
-    <div className={`setup-row tone-${tone}`}>
-      <div className="setup-icon" />
-      <div className="setup-copy">
-        <strong>{title}</strong>
-        <p>{detail}</p>
-      </div>
-      {action ? <div className="setup-action">{action}</div> : null}
-    </div>
-  );
-}
-
-function SparkRow({ label, values, tone, tag }) {
-  return (
-    <div className="spark-row">
-      <div className="spark-head">
-        <span>{label}</span>
-        <strong>{tag}</strong>
-      </div>
-      <div className="spark-bars">
-        {values.map((value, index) => (
-          <i
-            key={`${label}-${index}`}
-            className={`spark-bar tone-${tone}`}
-            style={{ height: `${value}%` }}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function getInstallationStatusCopy(state) {
-  switch (state.status) {
-    case "requesting-install-url":
-      return {
-        label: "Starting install",
-        detail: "Repo-service is returning the GitHub App installation URL."
-      };
-    case "pending-claim":
-      return {
-        label: "Returned from GitHub",
-        detail: `Installation ${state.installationId} came back from GitHub and is waiting to be claimed.`
-      };
-    case "claiming":
-      return {
-        label: "Claiming installation",
-        detail: `Frontend is linking installation ${state.installationId} to the logged-in user.`
-      };
-    case "claimed":
-      return {
-        label: "Linked",
-        detail: `Installation ${state.installationId} is now attached to your CodeAtlas account.`
-      };
-    case "failed":
-      return {
-        label: "Failed",
-        detail: state.error || "The installation flow did not complete successfully."
-      };
-    default:
-      return {
-        label: "Ready to link",
-        detail: "No GitHub App installation has been started yet."
-      };
-  }
-}
-
-function mapBadgeTone(status) {
-  switch (status) {
-    case "claimed":
-      return "success";
-    case "failed":
-      return "danger";
-    case "idle":
-      return "primary";
-    default:
-      return "warning";
-  }
+function getSetupSummary(user, installations, selectedInstallation, selectedRepository) {
+  return [
+    {
+      label: "Signed in",
+      meta: user ? "Done" : "Pending",
+      state: user ? "done" : "idle"
+    },
+    {
+      label: "Installations",
+      meta: installations.length > 0 ? `${installations.length} available` : "None yet",
+      state: installations.length > 0 ? "done" : "active"
+    },
+    {
+      label: "Installation selected",
+      meta: selectedInstallation ? "Ready" : "Choose one",
+      state: selectedInstallation ? "done" : "idle"
+    },
+    {
+      label: "Repository selected",
+      meta: selectedRepository ? "Ready to connect" : "Choose one",
+      state: selectedRepository ? "done" : "idle"
+    }
+  ];
 }
 
 createRoot(document.getElementById("app")).render(<App />);

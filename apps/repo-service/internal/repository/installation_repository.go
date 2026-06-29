@@ -2,11 +2,15 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"codeatlas/apps/repo-service/internal/installations"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var ErrInstallationNotFound = errors.New("installation not found")
 
 type InstallationRepository struct {
 	db *pgxpool.Pool
@@ -90,4 +94,93 @@ func (r *InstallationRepository) ClaimInstallation(ctx context.Context, installa
 	}
 
 	return installation, nil
+}
+
+func (r *InstallationRepository) FindClaimedInstallationForUser(ctx context.Context, installationID int64, userID int64) (installations.Installation, error) {
+	const query = `
+		SELECT
+			id,
+			installation_id,
+			installed_by_user_id,
+			account_login,
+			account_type,
+			setup_action,
+			status,
+			created_at,
+			updated_at
+		FROM github_app_installations
+		WHERE installation_id = $1
+		  AND installed_by_user_id = $2
+	`
+
+	var installation installations.Installation
+	err := r.db.QueryRow(ctx, query, installationID, userID).Scan(
+		&installation.ID,
+		&installation.InstallationID,
+		&installation.InstalledByUserID,
+		&installation.AccountLogin,
+		&installation.AccountType,
+		&installation.SetupAction,
+		&installation.Status,
+		&installation.CreatedAt,
+		&installation.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return installations.Installation{}, ErrInstallationNotFound
+		}
+		return installations.Installation{}, fmt.Errorf("find claimed installation for user: %w", err)
+	}
+
+	return installation, nil
+}
+
+func (r *InstallationRepository) ListInstallationsForUser(ctx context.Context, userID int64) ([]installations.Installation, error) {
+	const query = `
+		SELECT
+			id,
+			installation_id,
+			installed_by_user_id,
+			account_login,
+			account_type,
+			setup_action,
+			status,
+			created_at,
+			updated_at
+		FROM github_app_installations
+		WHERE installed_by_user_id = $1
+		ORDER BY updated_at DESC, created_at DESC
+	`
+
+	rows, err := r.db.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list installations for user: %w", err)
+	}
+	defer rows.Close()
+
+	var items []installations.Installation
+	for rows.Next() {
+		var installation installations.Installation
+		if err := rows.Scan(
+			&installation.ID,
+			&installation.InstallationID,
+			&installation.InstalledByUserID,
+			&installation.AccountLogin,
+			&installation.AccountType,
+			&installation.SetupAction,
+			&installation.Status,
+			&installation.CreatedAt,
+			&installation.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan installation row: %w", err)
+		}
+
+		items = append(items, installation)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate installations: %w", err)
+	}
+
+	return items, nil
 }

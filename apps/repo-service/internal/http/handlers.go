@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -50,7 +51,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/repos/", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleRepositoryByID)))
 	mux.Handle("/integrations/github/install", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleGitHubInstallURL)))
 	mux.HandleFunc("/integrations/github/setup", h.handleGitHubSetup)
+	mux.Handle("/integrations/github/installations", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleGitHubInstallations)))
 	mux.Handle("/integrations/github/installations/claim", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleClaimInstallation)))
+	mux.Handle("/integrations/github/installations/", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleGitHubInstallationRoutes)))
 }
 
 type claimInstallationRequest struct {
@@ -188,6 +191,114 @@ func (h *Handler) handleClaimInstallation(w http.ResponseWriter, r *http.Request
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"installation": installation,
+	})
+}
+
+func (h *Handler) handleGitHubInstallations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	userID, ok := CurrentUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "user not found in token",
+		})
+		return
+	}
+
+	installations, err := h.installationRepo.ListInstallationsForUser(r.Context(), userID)
+	if err != nil {
+		h.logger.Error("list installations for user", "error", err, "user_id", userID)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to list installations",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"installations": installations,
+	})
+}
+
+func (h *Handler) handleGitHubInstallationRoutes(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/integrations/github/installations/")
+	path = strings.TrimSpace(path)
+	if path == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "missing installation route",
+		})
+		return
+	}
+
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 || parts[1] != "repositories" {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "route not found",
+		})
+		return
+	}
+
+	installationID, err := parseInt64(parts[0])
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid installation id",
+		})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		h.handleInstallationRepositories(w, r, installationID)
+	default:
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+	}
+}
+
+func (h *Handler) handleInstallationRepositories(w http.ResponseWriter, r *http.Request, installationID int64) {
+	userID, ok := CurrentUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "user not found in token",
+		})
+		return
+	}
+
+	installation, err := h.installationRepo.FindClaimedInstallationForUser(r.Context(), installationID, userID)
+	if err != nil {
+		if errors.Is(err, repository.ErrInstallationNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "installation not found for user",
+			})
+			return
+		}
+
+		h.logger.Error("find claimed installation for repositories", "error", err, "installation_id", installationID, "user_id", userID)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to resolve installation ownership",
+		})
+		return
+	}
+
+	repositories, err := h.githubApp.ListInstallationRepositories(r.Context(), installation.InstallationID)
+	if err != nil {
+		h.logger.Error("list github installation repositories", "error", err, "installation_id", installation.InstallationID)
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": "failed to list repositories from github app installation",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"installation": installation,
+		"repositories": repositories,
 	})
 }
 

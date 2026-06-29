@@ -43,7 +43,16 @@ func New(ctx context.Context, cfg serviceconfig.Config) (*App, error) {
 	repositoryRepo := repository.NewRepositoryRepository(dbPool)
 	installationRepo := repository.NewInstallationRepository(dbPool)
 	tokenManager := httpapi.NewTokenManager(cfg.JWTSecret)
-	githubApp := integrations.NewGitHubApp(cfg.GitHubAppSlug)
+	githubApp, err := integrations.NewGitHubApp(integrations.GitHubAppConfig{
+		Slug:           cfg.GitHubAppSlug,
+		AppID:          cfg.GitHubAppID,
+		ClientID:       cfg.GitHubAppClientID,
+		PrivateKeyPath: cfg.GitHubAppPrivateKeyPath,
+		APIBaseURL:     cfg.GitHubAPIBaseURL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configure github app integration: %w", err)
+	}
 
 	mux := http.NewServeMux()
 	handler := httpapi.NewHandler(cfg, log, repositoryRepo, installationRepo, tokenManager, githubApp)
