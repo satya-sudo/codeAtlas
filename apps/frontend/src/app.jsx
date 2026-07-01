@@ -29,6 +29,8 @@ function App() {
   const [repositoriesError, setRepositoriesError] = useState("");
   const [repositorySearch, setRepositorySearch] = useState("");
   const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
+  const [connectStatus, setConnectStatus] = useState("idle");
+  const [connectError, setConnectError] = useState("");
 
   useEffect(() => {
     const currentUrl = new URL(window.location.href);
@@ -427,11 +429,47 @@ function App() {
     }
   };
 
-  const handleRepositoryConnect = () => {
-    if (!selectedRepository) {
+  const handleRepositoryConnect = async () => {
+    if (!selectedRepository || !selectedInstallation) {
       return;
     }
-    setToast(`Repository connect endpoint is next. Selected ${selectedRepository.full_name}.`);
+
+    setConnectStatus("loading");
+    setConnectError("");
+
+    try {
+      const response = await fetch(
+        `${CONFIG.repoBaseUrl}/integrations/github/installations/${selectedInstallation.installation_id}/repositories/connect`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            github_repo_id: selectedRepository.id
+          })
+        }
+      );
+
+      if (response.status === 401) {
+        localStorage.removeItem(CONFIG.tokenStorageKey);
+        resetSession("Session expired. Sign in again.");
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(`connect repository failed with status ${response.status}`);
+      }
+
+      const payload = await response.json();
+      setConnectStatus("success");
+      setToast(`Connected ${payload.repository.full_name}.`);
+    } catch (error) {
+      console.error(error);
+      setConnectStatus("failed");
+      setConnectError("Could not connect the selected repository.");
+    }
   };
 
   if (!user) {
@@ -635,12 +673,13 @@ function App() {
 
                 <button
                   type="button"
-                  className={`button button-primary button-full ${selectedRepository ? "" : "is-disabled"}`}
-                  disabled={!selectedRepository}
+                  className={`button button-primary button-full ${selectedRepository && connectStatus !== "loading" ? "" : "is-disabled"}`}
+                  disabled={!selectedRepository || connectStatus === "loading"}
                   onClick={handleRepositoryConnect}
                 >
-                  Connect repository
+                  {connectStatus === "loading" ? "Connecting..." : "Connect repository"}
                 </button>
+                {connectError ? <p className="inline-error connect-error">{connectError}</p> : null}
               </section>
 
               <section className="panel panel-note">
