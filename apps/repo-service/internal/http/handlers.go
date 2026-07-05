@@ -60,6 +60,14 @@ type claimInstallationRequest struct {
 	InstallationID int64 `json:"installation_id"`
 }
 
+type connectInstallationRepositoryRequest struct {
+	GitHubRepoID int64 `json:"github_repo_id"`
+}
+
+type createSyncRunRequest struct {
+	SyncType string `json:"sync_type"`
+}
+
 func (h *Handler) handleGitHubInstallURL(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET, OPTIONS")
@@ -229,14 +237,12 @@ func (h *Handler) handleGitHubInstallationRoutes(w http.ResponseWriter, r *http.
 	path := strings.TrimPrefix(r.URL.Path, "/integrations/github/installations/")
 	path = strings.TrimSpace(path)
 	if path == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "missing installation route",
-		})
+		h.handleGitHubInstallations(w, r)
 		return
 	}
 
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) != 2 || parts[1] != "repositories" {
+	if len(parts) < 2 || parts[1] != "repositories" {
 		writeJSON(w, http.StatusNotFound, map[string]string{
 			"error": "route not found",
 		})
@@ -251,15 +257,141 @@ func (h *Handler) handleGitHubInstallationRoutes(w http.ResponseWriter, r *http.
 		return
 	}
 
-	switch r.Method {
-	case http.MethodGet:
-		h.handleInstallationRepositories(w, r, installationID)
-	default:
-		w.Header().Set("Allow", "GET, OPTIONS")
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
-			"error": "method not allowed",
-		})
+	if len(parts) == 2 {
+		switch r.Method {
+		case http.MethodGet:
+			h.handleInstallationRepositories(w, r, installationID)
+		default:
+			w.Header().Set("Allow", "GET, OPTIONS")
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+				"error": "method not allowed",
+			})
+		}
+		return
 	}
+
+	if len(parts) == 3 && parts[2] == "connect" {
+		switch r.Method {
+		case http.MethodPost:
+			h.handleConnectInstallationRepository(w, r, installationID)
+		default:
+			w.Header().Set("Allow", "POST, OPTIONS")
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+				"error": "method not allowed",
+			})
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusNotFound, map[string]string{
+		"error": "route not found",
+	})
+}
+
+func (h *Handler) handleConnectInstallationRepository(w http.ResponseWriter, r *http.Request, installationID int64) {
+	userID, ok := CurrentUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "user not found in token",
+		})
+		return
+	}
+
+	installation, err := h.installationRepo.FindClaimedInstallationForUser(r.Context(), installationID, userID)
+	if err != nil {
+		if errors.Is(err, repository.ErrInstallationNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "installation not found for user",
+			})
+			return
+		}
+
+		h.logger.Error("find claimed installation for connect", "error", err, "installation_id", installationID, "user_id", userID)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to resolve installation ownership",
+		})
+		return
+	}
+
+	var payload connectInstallationRepositoryRequest
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid request body",
+		})
+		return
+	}
+
+	if payload.GitHubRepoID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "github_repo_id is required",
+		})
+		return
+	}
+
+	githubRepositories, err := h.githubApp.ListInstallationRepositories(r.Context(), installation.InstallationID)
+	if err != nil {
+		h.logger.Error("list github installation repositories for connect", "error", err, "installation_id", installation.InstallationID)
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": "failed to list repositories from github app installation",
+		})
+		return
+	}
+
+	var selectedRepo *integrationsRepository
+	for i := range githubRepositories {
+		repo := githubRepositories[i]
+		if repo.ID == payload.GitHubRepoID {
+			selectedRepo = &integrationsRepository{
+				ID:            repo.ID,
+				Name:          repo.Name,
+				FullName:      repo.FullName,
+				Private:       repo.Private,
+				DefaultBranch: repo.DefaultBranch,
+				OwnerLogin:    repo.Owner.Login,
+			}
+			break
+		}
+	}
+
+	if selectedRepo == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "repository not found in installation",
+		})
+		return
+	}
+
+	result, err := h.repositoryRepo.ConnectRepository(r.Context(), repos.ConnectRepositoryInput{
+		UserID:         userID,
+		GitHubRepoID:   selectedRepo.ID,
+		Owner:          selectedRepo.OwnerLogin,
+		Name:           selectedRepo.Name,
+		DefaultBranch:  selectedRepo.DefaultBranch,
+		IsPrivate:      selectedRepo.Private,
+		InstallationID: &installation.InstallationID,
+	})
+	if err != nil {
+		h.logger.Error("connect repository from installation", "error", err, "installation_id", installation.InstallationID, "github_repo_id", payload.GitHubRepoID)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to connect repository",
+		})
+		return
+	}
+
+	statusCode := http.StatusOK
+	if result.ConnectionStatus == repos.ConnectionStatusCreated {
+		statusCode = http.StatusCreated
+	}
+
+	writeJSON(w, statusCode, result)
+}
+
+type integrationsRepository struct {
+	ID            int64
+	Name          string
+	FullName      string
+	Private       bool
+	DefaultBranch string
+	OwnerLogin    string
 }
 
 func (h *Handler) handleInstallationRepositories(w http.ResponseWriter, r *http.Request, installationID int64) {
@@ -342,7 +474,7 @@ func (h *Handler) handleRepositories(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		repo, err := h.repositoryRepo.ConnectRepository(r.Context(), input)
+		result, err := h.repositoryRepo.ConnectRepository(r.Context(), input)
 		if err != nil {
 			h.logger.Error("connect repository", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
@@ -351,9 +483,12 @@ func (h *Handler) handleRepositories(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		writeJSON(w, http.StatusCreated, map[string]any{
-			"repository": repo,
-		})
+		statusCode := http.StatusOK
+		if result.ConnectionStatus == repos.ConnectionStatusCreated {
+			statusCode = http.StatusCreated
+		}
+
+		writeJSON(w, statusCode, result)
 	default:
 		w.Header().Set("Allow", "GET, POST, OPTIONS")
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
@@ -363,14 +498,6 @@ func (h *Handler) handleRepositories(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleRepositoryByID(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", "GET, OPTIONS")
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
-			"error": "method not allowed",
-		})
-		return
-	}
-
 	userID, ok := CurrentUserID(r)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{
@@ -379,16 +506,16 @@ func (h *Handler) handleRepositoryByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	repositoryIDValue := strings.TrimPrefix(r.URL.Path, "/repos/")
-	repositoryIDValue = strings.TrimSpace(repositoryIDValue)
-	if repositoryIDValue == "" {
+	path := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/repos/"))
+	if path == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "missing repository id",
 		})
 		return
 	}
 
-	repositoryID, err := parseInt64(repositoryIDValue)
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	repositoryID, err := parseInt64(parts[0])
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "invalid repository id",
@@ -396,16 +523,168 @@ func (h *Handler) handleRepositoryByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	repo, err := h.repositoryRepo.FindRepositoryForUser(r.Context(), userID, repositoryID)
-	if err != nil {
-		h.logger.Error("find repository", "repository_id", repositoryID, "error", err)
+	if len(parts) == 1 {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET, OPTIONS")
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+				"error": "method not allowed",
+			})
+			return
+		}
+
+		repo, err := h.repositoryRepo.FindRepositoryForUser(r.Context(), userID, repositoryID)
+		if err != nil {
+			h.logger.Error("find repository", "repository_id", repositoryID, "error", err)
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "repository not found",
+			})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"repository": repo,
+		})
+		return
+	}
+
+	switch parts[1] {
+	case "sync":
+		h.handleRepositorySync(w, r, userID, repositoryID)
+	case "sync-runs":
+		h.handleRepositorySyncRuns(w, r, userID, repositoryID, parts[2:])
+	case "contributors":
+		h.handleRepositoryContributors(w, r, userID, repositoryID)
+	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{
-			"error": "repository not found",
+			"error": "route not found",
+		})
+	}
+}
+
+func (h *Handler) handleRepositorySync(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	payload := createSyncRunRequest{SyncType: repos.SyncTypeInitial}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+	}
+	if strings.TrimSpace(payload.SyncType) == "" {
+		payload.SyncType = repos.SyncTypeInitial
+	}
+
+	run, err := h.repositoryRepo.CreateSyncRunForRepository(r.Context(), userID, repositoryID, payload.SyncType)
+	if err != nil {
+		if errors.Is(err, repository.ErrRepositoryNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "repository not found",
+			})
+			return
+		}
+		h.logger.Error("create sync run", "repository_id", repositoryID, "user_id", userID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to create sync run",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"sync_run": run,
+	})
+}
+
+func (h *Handler) handleRepositorySyncRuns(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64, tail []string) {
+	if len(tail) == 0 {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET, OPTIONS")
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+				"error": "method not allowed",
+			})
+			return
+		}
+
+		runs, err := h.repositoryRepo.ListSyncRunsForRepository(r.Context(), userID, repositoryID)
+		if err != nil {
+			h.logger.Error("list sync runs", "repository_id", repositoryID, "user_id", userID, "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "failed to list sync runs",
+			})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"sync_runs": runs,
+		})
+		return
+	}
+
+	if len(tail) == 1 {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET, OPTIONS")
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+				"error": "method not allowed",
+			})
+			return
+		}
+
+		runID, err := parseInt64(tail[0])
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid sync run id",
+			})
+			return
+		}
+
+		run, err := h.repositoryRepo.FindSyncRunForRepository(r.Context(), userID, repositoryID, runID)
+		if err != nil {
+			if errors.Is(err, repository.ErrRepositoryNotFound) {
+				writeJSON(w, http.StatusNotFound, map[string]string{
+					"error": "sync run not found",
+				})
+				return
+			}
+			h.logger.Error("find sync run", "repository_id", repositoryID, "run_id", runID, "user_id", userID, "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "failed to find sync run",
+			})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"sync_run": run,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusNotFound, map[string]string{
+		"error": "route not found",
+	})
+}
+
+func (h *Handler) handleRepositoryContributors(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	contributors, err := h.repositoryRepo.ListContributorsForRepository(r.Context(), userID, repositoryID)
+	if err != nil {
+		h.logger.Error("list contributors", "repository_id", repositoryID, "user_id", userID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to list contributors",
 		})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"repository": repo,
+		"contributors": contributors,
 	})
 }

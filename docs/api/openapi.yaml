@@ -1,0 +1,740 @@
+openapi: 3.0.3
+info:
+  title: CodeAtlas API
+  version: 0.1.0
+  description: |
+    Current backend API surface for the CodeAtlas V1 local development setup.
+
+    Primary onboarding flow:
+    1. Sign in with GitHub through the auth service.
+    2. Install the CodeAtlas GitHub App on a personal account or organization.
+    3. Claim the returned GitHub App installation for the signed-in CodeAtlas user.
+    4. List repositories visible through that installation.
+    5. Connect one repository into CodeAtlas for later sync and analytics.
+servers:
+  - url: http://localhost:8061
+    description: Auth service
+  - url: http://localhost:8062
+    description: Repository service
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    User:
+      type: object
+      required: [id, github_id, username, avatar_url, created_at, updated_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        github_id:
+          type: integer
+          format: int64
+        username:
+          type: string
+        avatar_url:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    MeResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+    CallbackResponse:
+      type: object
+      required: [token, user]
+      properties:
+        token:
+          type: string
+        user:
+          $ref: '#/components/schemas/User'
+    Installation:
+      type: object
+      required: [id, installation_id, status, created_at, updated_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        installation_id:
+          type: integer
+          format: int64
+        installed_by_user_id:
+          type: integer
+          format: int64
+          nullable: true
+        account_login:
+          type: string
+          nullable: true
+        account_type:
+          type: string
+          nullable: true
+        setup_action:
+          type: string
+          nullable: true
+        status:
+          type: string
+          example: pending_verification
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    InstallationListResponse:
+      type: object
+      required: [installations]
+      properties:
+        installations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Installation'
+    ClaimInstallationRequest:
+      type: object
+      required: [installation_id]
+      properties:
+        installation_id:
+          type: integer
+          format: int64
+    ClaimInstallationResponse:
+      type: object
+      required: [installation]
+      properties:
+        installation:
+          $ref: '#/components/schemas/Installation'
+    GitHubOwner:
+      type: object
+      required: [login, type]
+      properties:
+        login:
+          type: string
+        type:
+          type: string
+          example: User
+    InstallationRepository:
+      type: object
+      required: [id, name, full_name, private, default_branch, html_url, owner]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        full_name:
+          type: string
+        private:
+          type: boolean
+        default_branch:
+          type: string
+        html_url:
+          type: string
+        owner:
+          $ref: '#/components/schemas/GitHubOwner'
+    InstallationRepositoriesResponse:
+      type: object
+      required: [installation, repositories]
+      properties:
+        installation:
+          $ref: '#/components/schemas/Installation'
+        repositories:
+          type: array
+          items:
+            $ref: '#/components/schemas/InstallationRepository'
+    Repository:
+      type: object
+      required: [id, github_repo_id, owner, name, full_name, default_branch, is_private, sync_status, created_at, updated_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        github_repo_id:
+          type: integer
+          format: int64
+        owner:
+          type: string
+        name:
+          type: string
+        full_name:
+          type: string
+        default_branch:
+          type: string
+        is_private:
+          type: boolean
+        installation_id:
+          type: integer
+          format: int64
+          nullable: true
+        webhook_id:
+          type: integer
+          format: int64
+          nullable: true
+        sync_status:
+          type: string
+        last_synced_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RepositoryListResponse:
+      type: object
+      required: [repositories]
+      properties:
+        repositories:
+          type: array
+          items:
+            $ref: '#/components/schemas/Repository'
+    RepositoryResponse:
+      type: object
+      required: [repository, connection_status]
+      properties:
+        repository:
+          $ref: '#/components/schemas/Repository'
+        connection_status:
+          type: string
+          enum: [created, already_connected, updated]
+    SyncRun:
+      type: object
+      required: [id, repository_id, sync_type, status, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        repository_id:
+          type: integer
+          format: int64
+        sync_type:
+          type: string
+          enum: [initial, incremental, manual]
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed]
+        error_message:
+          type: string
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    SyncRunResponse:
+      type: object
+      required: [sync_run]
+      properties:
+        sync_run:
+          $ref: '#/components/schemas/SyncRun'
+    SyncRunListResponse:
+      type: object
+      required: [sync_runs]
+      properties:
+        sync_runs:
+          type: array
+          items:
+            $ref: '#/components/schemas/SyncRun'
+    Contributor:
+      type: object
+      required: [id, repository_id, github_user_id, username, contributions_count, created_at, updated_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        repository_id:
+          type: integer
+          format: int64
+        github_user_id:
+          type: integer
+          format: int64
+        username:
+          type: string
+        avatar_url:
+          type: string
+          nullable: true
+        contributions_count:
+          type: integer
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ContributorListResponse:
+      type: object
+      required: [contributors]
+      properties:
+        contributors:
+          type: array
+          items:
+            $ref: '#/components/schemas/Contributor'
+    ConnectRepositoryRequest:
+      type: object
+      required: [github_repo_id, owner, name, default_branch]
+      properties:
+        github_repo_id:
+          type: integer
+          format: int64
+        owner:
+          type: string
+        name:
+          type: string
+        default_branch:
+          type: string
+        is_private:
+          type: boolean
+        installation_id:
+          type: integer
+          format: int64
+          nullable: true
+    ConnectInstallationRepositoryRequest:
+      type: object
+      required: [github_repo_id]
+      properties:
+        github_repo_id:
+          type: integer
+          format: int64
+    InstallURLResponse:
+      type: object
+      required: [install_url]
+      properties:
+        install_url:
+          type: string
+    SetupCallbackResponse:
+      type: object
+      required: [installation]
+      properties:
+        installation:
+          $ref: '#/components/schemas/Installation'
+paths:
+  /auth/github/login:
+    get:
+      summary: Start GitHub OAuth login
+      description: Redirects the browser to GitHub OAuth.
+      responses:
+        '307':
+          description: Redirect to GitHub
+  /auth/github/callback:
+    get:
+      summary: Finish GitHub OAuth login
+      description: |
+        Handles the GitHub OAuth callback. In local frontend mode this usually redirects back to the frontend with a JWT in the query string.
+      parameters:
+        - in: query
+          name: code
+          schema:
+            type: string
+        - in: query
+          name: state
+          schema:
+            type: string
+      responses:
+        '200':
+          description: JWT returned directly when no frontend redirect is configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallbackResponse'
+        '307':
+          description: Redirect back to frontend with token query parameter
+        '400':
+          description: Missing callback parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Invalid OAuth state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /auth/me:
+    get:
+      summary: Get current signed-in user
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeResponse'
+        '401':
+          description: Missing or invalid JWT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /integrations/github/install:
+    get:
+      summary: Get GitHub App install URL
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: GitHub App install link
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstallURLResponse'
+        '401':
+          description: Missing or invalid JWT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /integrations/github/setup:
+    get:
+      summary: Handle GitHub App setup callback
+      description: Records the returned installation id from GitHub. May redirect to the frontend with installation details.
+      parameters:
+        - in: query
+          name: installation_id
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - in: query
+          name: setup_action
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Installation callback recorded directly
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetupCallbackResponse'
+        '307':
+          description: Redirect back to frontend with installation details
+        '400':
+          description: Missing or invalid installation_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /integrations/github/installations:
+    get:
+      summary: List GitHub App access linked to the current user
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Installations for current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstallationListResponse'
+        '401':
+          description: Missing or invalid JWT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /integrations/github/installations/claim:
+    post:
+      summary: Claim a returned GitHub App installation for the current user
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaimInstallationRequest'
+      responses:
+        '200':
+          description: Installation claimed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimInstallationResponse'
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid JWT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /integrations/github/installations/{installationId}/repositories:
+    get:
+      summary: List repositories available through one GitHub App installation
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: installationId
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Installation and visible repositories
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstallationRepositoriesResponse'
+        '401':
+          description: Missing or invalid JWT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Installation not found for current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /integrations/github/installations/{installationId}/repositories/connect:
+    post:
+      summary: Connect one repository from an installation into CodeAtlas
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: installationId
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectInstallationRepositoryRequest'
+      responses:
+        '201':
+          description: Repository connected in CodeAtlas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepositoryResponse'
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid JWT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Installation or repository not found for current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /repos:
+    get:
+      summary: List repositories already connected for the current user
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Connected repositories
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepositoryListResponse'
+    post:
+      summary: Connect a repository directly with provided GitHub metadata
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectRepositoryRequest'
+      responses:
+        '201':
+          description: Repository connected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepositoryResponse'
+        '400':
+          description: Missing required repository fields
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /repos/{repositoryId}:
+    get:
+      summary: Get one connected repository by local CodeAtlas id
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: repositoryId
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Repository details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepositoryResponse'
+        '400':
+          description: Missing or invalid repository id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid JWT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Repository not found for current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /repos/{repositoryId}/sync:
+    post:
+      summary: Queue a sync run for a connected repository
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: repositoryId
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sync_type:
+                  type: string
+                  default: initial
+      responses:
+        '201':
+          description: Sync run queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncRunResponse'
+        '404':
+          description: Repository not found for current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /repos/{repositoryId}/sync-runs:
+    get:
+      summary: List sync runs for a connected repository
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: repositoryId
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Repository sync runs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncRunListResponse'
+  /repos/{repositoryId}/sync-runs/{runId}:
+    get:
+      summary: Get one sync run for a connected repository
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: repositoryId
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - in: path
+          name: runId
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Sync run details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncRunResponse'
+        '404':
+          description: Sync run not found for current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /repos/{repositoryId}/contributors:
+    get:
+      summary: List synced contributors for a connected repository
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: repositoryId
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Repository contributors
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContributorListResponse'

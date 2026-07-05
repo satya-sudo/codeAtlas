@@ -150,9 +150,7 @@ a {
   pointer-events: none;
   opacity: 0.4;
   background-size: 40px 40px;
-  background-image:
-    linear-gradient(to right, #e2e8f0 1px, transparent 1px),
-    linear-gradient(to bottom, #e2e8f0 1px, transparent 1px);
+  background-image: linear-gradient(to right, #e2e8f0 1px, transparent 1px), linear-gradient(to bottom, #e2e8f0 1px, transparent 1px);
   mask-image: radial-gradient(ellipse at center, black, transparent 78%);
 }
 
@@ -223,7 +221,8 @@ a {
 .installation-copy span,
 .repository-row p,
 .selection-grid dt,
-.topbar-brand span {
+.topbar-brand span,
+.panel-subtitle {
   color: var(--muted);
 }
 
@@ -302,7 +301,8 @@ a {
 }
 
 .topbar-brand span,
-.summary-step span {
+.summary-step span,
+.eyebrow {
   font-family: var(--font-code);
   font-size: 0.72rem;
   letter-spacing: 0.05em;
@@ -350,6 +350,12 @@ a {
 
 .page-intro {
   margin-bottom: 24px;
+}
+
+.eyebrow {
+  display: inline-block;
+  margin-bottom: 10px;
+  color: var(--primary);
 }
 
 .page-intro h1 {
@@ -433,12 +439,31 @@ a {
   margin-bottom: 16px;
 }
 
+.panel-head-stack {
+  align-items: flex-start;
+}
+
+.panel-head-stack > div:first-child {
+  display: grid;
+  gap: 6px;
+}
+
+.panel-head-search {
+  align-items: flex-end;
+}
+
 .panel h2 {
   font-size: 1.2rem;
 }
 
 .panel h3 {
   font-size: 1.05rem;
+}
+
+.panel-subtitle {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.5;
 }
 
 .panel-message {
@@ -528,10 +553,6 @@ a {
   font-family: var(--font-code);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-
-.panel-head-search {
-  flex-wrap: wrap;
 }
 
 .search-shell {
@@ -641,6 +662,22 @@ a {
   font-size: 0.95rem;
 }
 
+.next-steps-list {
+  margin: 12px 0 0;
+  padding-left: 20px;
+  color: var(--muted);
+  display: grid;
+  gap: 10px;
+}
+
+.next-steps-list li {
+  line-height: 1.5;
+}
+
+.connect-error {
+  margin-top: 12px;
+}
+
 .inline-alert {
   margin-top: 18px;
   padding: 14px 16px;
@@ -694,6 +731,17 @@ a {
     padding: 24px 0 32px;
   }
 
+  .panel-head-stack-mobile,
+  .panel-head,
+  .panel-head-search {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .search-shell {
+    width: 100%;
+  }
+
   .repository-row {
     flex-direction: column;
     align-items: flex-start;
@@ -702,4 +750,111 @@ a {
   .repository-row .button {
     width: 100%;
   }
+}
+
+
+.tag-success {
+  background: var(--success-soft);
+  border-color: rgba(21, 128, 61, 0.18);
+  color: var(--success);
+}
+
+.compact-empty-state {
+  padding: 14px;
+}
+
+.connected-repo-list {
+  display: grid;
+  gap: 12px;
+}
+
+.connected-repo-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface-soft);
+}
+
+.connected-repo-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.connected-repo-card strong {
+  display: block;
+  font-size: 0.95rem;
+  color: var(--primary);
+}
+
+.connected-repo-card p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  text-transform: capitalize;
+}
+
+.tight-tags {
+  margin-top: 0;
+}
+
+.sync-run-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sync-run-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-family: var(--font-code);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.sync-run-meta {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.sync-run-queued {
+  color: #8a5a00;
+  background: #fff4d6;
+  border-color: #f4d28a;
+}
+
+.sync-run-running {
+  color: #1d4ed8;
+  background: #dbeafe;
+  border-color: #93c5fd;
+}
+
+.sync-run-succeeded {
+  color: var(--success);
+  background: var(--success-soft);
+  border-color: rgba(21, 128, 61, 0.18);
+}
+
+.sync-run-failed {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: rgba(185, 28, 28, 0.12);
+}
+
+.sync-run-none {
+  color: var(--muted);
+}
+
+.repo-inline-error {
+  margin-top: 2px;
 }

@@ -9,4 +9,5 @@ build/
 coverage/
 tmp/
 *.log
+apps/frontend/.parcel-cache
 

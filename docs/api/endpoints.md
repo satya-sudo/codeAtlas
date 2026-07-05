@@ -1,23 +1,21 @@
 # API Surface
 
-## Auth
+## Auth Service (`http://localhost:8061`)
 
-- `POST /auth/github`
+- `GET /auth/github/login`
+- `GET /auth/github/callback`
 - `GET /auth/me`
 
-## Repositories
+## Repo Service (`http://localhost:8062`)
 
+- `GET /integrations/github/install`
+- `GET /integrations/github/setup`
+- `GET /integrations/github/installations`
+- `POST /integrations/github/installations/claim`
+- `GET /integrations/github/installations/{installationId}/repositories`
+- `POST /integrations/github/installations/{installationId}/repositories/connect`
 - `GET /repos`
-- `POST /repos/connect`
-- `GET /repos/:id`
+- `POST /repos`
+- `GET /repos/{id}`
 
-## Analytics
-
-- `GET /repos/:id/overview`
-- `GET /repos/:id/hotspots`
-- `GET /repos/:id/modules/ownership`
-- `GET /repos/:id/modules/expertise`
-- `GET /repos/:id/modules/bus-factor`
-- `GET /repos/:id/contributors`
-- `GET /repos/:id/graph`
-
+For request and response schemas, use [openapi.yaml](./openapi.yaml).
