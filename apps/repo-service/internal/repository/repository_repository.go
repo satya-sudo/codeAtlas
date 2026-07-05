@@ -236,7 +236,22 @@ func (r *RepositoryRepository) FindRepositoryForUser(ctx context.Context, userID
 	return repo, nil
 }
 
-func (r *RepositoryRepository) CreateSyncRunForRepository(ctx context.Context, userID int64, repositoryID int64, syncType string) (repos.SyncRun, error) {
+func (r *RepositoryRepository) CreateSyncRunForRepository(ctx context.Context, userID int64, repositoryID int64, syncType string) (repos.SyncRunRequestResult, error) {
+	activeRun, found, err := r.findActiveSyncRunForRepository(ctx, userID, repositoryID)
+	if err != nil {
+		return repos.SyncRunRequestResult{}, fmt.Errorf("find active sync run: %w", err)
+	}
+	if found {
+		requestStatus := repos.SyncRequestStatusAlreadyQueued
+		if activeRun.Status == repos.SyncRunStatusRunning {
+			requestStatus = repos.SyncRequestStatusAlreadyRunning
+		}
+		return repos.SyncRunRequestResult{
+			SyncRun:       activeRun,
+			RequestStatus: requestStatus,
+		}, nil
+	}
+
 	const query = `
 		INSERT INTO repository_sync_runs (
 			repository_id,
@@ -274,12 +289,15 @@ func (r *RepositoryRepository) CreateSyncRunForRepository(ctx context.Context, u
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return repos.SyncRun{}, ErrRepositoryNotFound
+			return repos.SyncRunRequestResult{}, ErrRepositoryNotFound
 		}
-		return repos.SyncRun{}, fmt.Errorf("create sync run: %w", err)
+		return repos.SyncRunRequestResult{}, fmt.Errorf("create sync run: %w", err)
 	}
 
-	return run, nil
+	return repos.SyncRunRequestResult{
+		SyncRun:       run,
+		RequestStatus: repos.SyncRequestStatusQueued,
+	}, nil
 }
 
 func (r *RepositoryRepository) ListSyncRunsForRepository(ctx context.Context, userID int64, repositoryID int64) ([]repos.SyncRun, error) {
@@ -415,6 +433,47 @@ func (r *RepositoryRepository) ListContributorsForRepository(ctx context.Context
 	}
 
 	return contributors, nil
+}
+
+func (r *RepositoryRepository) findActiveSyncRunForRepository(ctx context.Context, userID int64, repositoryID int64) (repos.SyncRun, bool, error) {
+	const query = `
+		SELECT
+			sr.id,
+			sr.repository_id,
+			sr.sync_type,
+			sr.status,
+			sr.error_message,
+			sr.started_at,
+			sr.completed_at,
+			sr.created_at
+		FROM repository_sync_runs sr
+		INNER JOIN user_repositories ur ON ur.repository_id = sr.repository_id
+		WHERE ur.user_id = $1
+		  AND sr.repository_id = $2
+		  AND sr.status IN ('queued', 'running')
+		ORDER BY sr.created_at DESC, sr.id DESC
+		LIMIT 1
+	`
+
+	var run repos.SyncRun
+	err := r.db.QueryRow(ctx, query, userID, repositoryID).Scan(
+		&run.ID,
+		&run.RepositoryID,
+		&run.SyncType,
+		&run.Status,
+		&run.ErrorMessage,
+		&run.StartedAt,
+		&run.CompletedAt,
+		&run.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return repos.SyncRun{}, false, nil
+		}
+		return repos.SyncRun{}, false, err
+	}
+
+	return run, true, nil
 }
 
 func (r *RepositoryRepository) findRepositoryForUserByGitHubRepoID(ctx context.Context, tx pgx.Tx, userID int64, githubRepoID int64) (repos.Repository, bool, error) {
