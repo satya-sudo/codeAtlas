@@ -277,7 +277,7 @@ func (r *RepositoryRepository) CreateSyncRunForRepository(ctx context.Context, u
 	`
 
 	var run repos.SyncRun
-	err := r.db.QueryRow(ctx, query, userID, repositoryID, syncType).Scan(
+	err = r.db.QueryRow(ctx, query, userID, repositoryID, syncType).Scan(
 		&run.ID,
 		&run.RepositoryID,
 		&run.SyncType,

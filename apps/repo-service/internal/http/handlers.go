@@ -578,7 +578,7 @@ func (h *Handler) handleRepositorySync(w http.ResponseWriter, r *http.Request, u
 		payload.SyncType = repos.SyncTypeInitial
 	}
 
-	run, err := h.repositoryRepo.CreateSyncRunForRepository(r.Context(), userID, repositoryID, payload.SyncType)
+	result, err := h.repositoryRepo.CreateSyncRunForRepository(r.Context(), userID, repositoryID, payload.SyncType)
 	if err != nil {
 		if errors.Is(err, repository.ErrRepositoryNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{
@@ -593,9 +593,12 @@ func (h *Handler) handleRepositorySync(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"sync_run": run,
-	})
+	statusCode := http.StatusCreated
+	if result.RequestStatus != repos.SyncRequestStatusQueued {
+		statusCode = http.StatusOK
+	}
+
+	writeJSON(w, statusCode, result)
 }
 
 func (h *Handler) handleRepositorySyncRuns(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64, tail []string) {

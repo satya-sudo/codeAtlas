@@ -43,6 +43,6 @@ type Contributor struct {
 }
 
 type SyncRunRequestResult struct {
-	SyncRun       SyncRun            `json:"sync_run"`
-	RequestStatus SyncRequestStatus  `json:"request_status"`
+	SyncRun       SyncRun           `json:"sync_run"`
+	RequestStatus SyncRequestStatus `json:"request_status"`
 }
