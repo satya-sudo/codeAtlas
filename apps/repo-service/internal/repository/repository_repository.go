@@ -252,6 +252,12 @@ func (r *RepositoryRepository) CreateSyncRunForRepository(ctx context.Context, u
 		}, nil
 	}
 
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return repos.SyncRunRequestResult{}, fmt.Errorf("begin create sync run transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	const query = `
 		INSERT INTO repository_sync_runs (
 			repository_id,
@@ -277,7 +283,7 @@ func (r *RepositoryRepository) CreateSyncRunForRepository(ctx context.Context, u
 	`
 
 	var run repos.SyncRun
-	err = r.db.QueryRow(ctx, query, userID, repositoryID, syncType).Scan(
+	err = tx.QueryRow(ctx, query, userID, repositoryID, syncType).Scan(
 		&run.ID,
 		&run.RepositoryID,
 		&run.SyncType,
@@ -292,6 +298,22 @@ func (r *RepositoryRepository) CreateSyncRunForRepository(ctx context.Context, u
 			return repos.SyncRunRequestResult{}, ErrRepositoryNotFound
 		}
 		return repos.SyncRunRequestResult{}, fmt.Errorf("create sync run: %w", err)
+	}
+
+	tag, err := tx.Exec(
+		ctx,
+		`UPDATE repositories SET sync_status = 'pending', updated_at = NOW() WHERE id = $1`,
+		repositoryID,
+	)
+	if err != nil {
+		return repos.SyncRunRequestResult{}, fmt.Errorf("mark repository pending: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return repos.SyncRunRequestResult{}, ErrRepositoryNotFound
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return repos.SyncRunRequestResult{}, fmt.Errorf("commit create sync run transaction: %w", err)
 	}
 
 	return repos.SyncRunRequestResult{

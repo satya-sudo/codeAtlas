@@ -491,6 +491,18 @@ function App() {
     };
   }, [token, user, deduplicatedConnectedRepositories, connectedReposVersion]);
 
+  useEffect(() => {
+    if (!token || !user || deduplicatedConnectedRepositories.length === 0) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(() => {
+      setConnectedReposVersion((current) => current + 1);
+    }, 5000);
+
+    return () => window.clearInterval(timer);
+  }, [token, user, deduplicatedConnectedRepositories.length]);
+
   const setupSummary = useMemo(
     () => getSetupSummary(user, installations, selectedInstallation, selectedRepository, deduplicatedConnectedRepositories),
     [user, installations, selectedInstallation, selectedRepository, deduplicatedConnectedRepositories]
@@ -658,6 +670,7 @@ function App() {
         ...current,
         [repo.id]: payload.sync_run
       }));
+      setConnectedReposVersion((current) => current + 1);
       setSyncActionStatusByRepo((current) => ({
         ...current,
         [repo.id]: "success"
@@ -925,15 +938,15 @@ function App() {
                         <div className="connected-repo-head">
                           <div>
                             <strong>{repo.full_name}</strong>
-                            <p>{repo.sync_status || "connected"}</p>
+                            <p>{getRepositorySyncHeadline(repo, latestSyncRunsByRepo[repo.id])}</p>
                           </div>
                           <button
                             type="button"
-                            className={`button button-secondary button-small ${syncActionStatusByRepo[repo.id] === "loading" ? "is-disabled" : ""}`}
-                            disabled={syncActionStatusByRepo[repo.id] === "loading"}
+                            className={`button button-secondary button-small ${syncActionStatusByRepo[repo.id] === "loading" || isSyncActive(latestSyncRunsByRepo[repo.id]) ? "is-disabled" : ""}`}
+                            disabled={syncActionStatusByRepo[repo.id] === "loading" || isSyncActive(latestSyncRunsByRepo[repo.id])}
                             onClick={() => handleQueueSync(repo)}
                           >
-                            {syncActionStatusByRepo[repo.id] === "loading" ? "Queueing..." : "Queue sync"}
+                            {syncActionStatusByRepo[repo.id] === "loading" ? "Queueing..." : isSyncActive(latestSyncRunsByRepo[repo.id]) ? "Sync active" : "Queue sync"}
                           </button>
                         </div>
                         <div className="sync-run-summary">
@@ -1012,6 +1025,32 @@ function getSetupSummary(user, installations, selectedInstallation, selectedRepo
       state: connectedRepositories.length > 0 ? "done" : "idle"
     }
   ];
+}
+
+function isSyncActive(syncRun) {
+  return syncRun?.status === "queued" || syncRun?.status === "running";
+}
+
+function getRepositorySyncHeadline(repo, latestSyncRun) {
+  if (latestSyncRun?.status === "queued") {
+    return "Queued";
+  }
+  if (latestSyncRun?.status === "running") {
+    return "Importing";
+  }
+
+  switch ((repo.sync_status || "").toLowerCase()) {
+    case "ready":
+      return "Ready";
+    case "importing":
+      return "Importing";
+    case "failed":
+      return "Failed";
+    case "pending":
+      return "Pending";
+    default:
+      return "Connected";
+  }
 }
 
 createRoot(document.getElementById("app")).render(<App />);

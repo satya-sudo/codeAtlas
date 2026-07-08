@@ -46,3 +46,12 @@ func (g *GitHubApp) ListRepositoryContributors(ctx context.Context, installation
 
 	return contributors, nil
 }
+
+func (g *GitHubApp) ListRepositoryCommits(ctx context.Context, installationID int64, owner string, repo string) ([]sharedgithub.RepositoryCommit, error) {
+	commits, err := g.client.ListRepositoryCommits(ctx, installationID, owner, repo)
+	if err != nil {
+		return nil, fmt.Errorf("list repository commits: %w", err)
+	}
+
+	return commits, nil
+}

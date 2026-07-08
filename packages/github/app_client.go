@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 const defaultAPIBaseURL = "https://api.github.com"
@@ -66,6 +68,31 @@ type RepositoryContributor struct {
 	Contributions int     `json:"contributions"`
 	Type          string  `json:"type"`
 	Name          *string `json:"name,omitempty"`
+}
+
+type RepositoryCommitFile struct {
+	Path         string  `json:"path"`
+	PreviousPath *string `json:"previous_path,omitempty"`
+	ChangeType   string  `json:"change_type"`
+	Additions    int     `json:"additions"`
+	Deletions    int     `json:"deletions"`
+	Changes      int     `json:"changes"`
+	PatchText    *string `json:"patch_text,omitempty"`
+}
+
+type RepositoryCommit struct {
+	SHA                string                 `json:"sha"`
+	AuthorGitHubUserID *int64                 `json:"author_github_user_id,omitempty"`
+	AuthorUsername     string                 `json:"author_username,omitempty"`
+	AuthorName         string                 `json:"author_name,omitempty"`
+	AuthorEmail        string                 `json:"author_email,omitempty"`
+	CommittedAt        time.Time              `json:"committed_at"`
+	Message            string                 `json:"message,omitempty"`
+	ParentCount        int                    `json:"parent_count"`
+	Additions          int                    `json:"additions"`
+	Deletions          int                    `json:"deletions"`
+	TotalChanges       int                    `json:"total_changes"`
+	Files              []RepositoryCommitFile `json:"files"`
 }
 
 func NewAppClient(cfg AppClientConfig) (*AppClient, error) {
@@ -267,6 +294,202 @@ func (c *AppClient) ListRepositoryContributors(ctx context.Context, installation
 	}
 
 	return allContributors, nil
+}
+
+func (c *AppClient) ListRepositoryCommits(ctx context.Context, installationID int64, owner string, repo string) ([]RepositoryCommit, error) {
+	token, err := c.CreateInstallationToken(ctx, installationID)
+	if err != nil {
+		return nil, err
+	}
+
+	const perPage = 100
+
+	type commitSummary struct {
+		SHA string `json:"sha"`
+	}
+
+	summaries := make([]commitSummary, 0, perPage)
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf(
+			"%s/repos/%s/%s/commits?per_page=%d&page=%d",
+			c.apiBaseURL,
+			url.PathEscape(owner),
+			url.PathEscape(repo),
+			perPage,
+			page,
+		)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
+		if err != nil {
+			return nil, fmt.Errorf("build repository commits request: %w", err)
+		}
+
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("Authorization", "Bearer "+token.Token)
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("request repository commits page %d: %w", page, err)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			defer resp.Body.Close()
+			return nil, decodeGitHubError(resp)
+		}
+
+		var pageSummaries []commitSummary
+		if err := json.NewDecoder(resp.Body).Decode(&pageSummaries); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("decode repository commits response page %d: %w", page, err)
+		}
+		resp.Body.Close()
+
+		summaries = append(summaries, pageSummaries...)
+		if len(pageSummaries) < perPage {
+			break
+		}
+	}
+
+	commits := make([]RepositoryCommit, len(summaries))
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(8)
+
+	for index, summary := range summaries {
+		index := index
+		summary := summary
+
+		group.Go(func() error {
+			commit, err := c.getRepositoryCommit(groupCtx, token.Token, owner, repo, summary.SHA)
+			if err != nil {
+				return err
+			}
+
+			// Preserve summary order even though detail fetches run concurrently.
+			commits[index] = commit
+			return nil
+		})
+	}
+
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+
+	return commits, nil
+}
+
+func (c *AppClient) getRepositoryCommit(ctx context.Context, installationToken string, owner string, repo string, sha string) (RepositoryCommit, error) {
+	endpoint := fmt.Sprintf(
+		"%s/repos/%s/%s/commits/%s",
+		c.apiBaseURL,
+		url.PathEscape(owner),
+		url.PathEscape(repo),
+		url.PathEscape(sha),
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
+	if err != nil {
+		return RepositoryCommit{}, fmt.Errorf("build repository commit detail request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+installationToken)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return RepositoryCommit{}, fmt.Errorf("request repository commit detail %s: %w", sha, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return RepositoryCommit{}, decodeGitHubError(resp)
+	}
+
+	var payload struct {
+		SHA    string `json:"sha"`
+		Author *struct {
+			ID    int64  `json:"id"`
+			Login string `json:"login"`
+		} `json:"author"`
+		Commit struct {
+			Author struct {
+				Name  string    `json:"name"`
+				Email string    `json:"email"`
+				Date  time.Time `json:"date"`
+			} `json:"author"`
+			Message string `json:"message"`
+		} `json:"commit"`
+		Parents []struct {
+			SHA string `json:"sha"`
+		} `json:"parents"`
+		Stats struct {
+			Additions int `json:"additions"`
+			Deletions int `json:"deletions"`
+			Total     int `json:"total"`
+		} `json:"stats"`
+		Files []struct {
+			Filename         string `json:"filename"`
+			PreviousFilename string `json:"previous_filename"`
+			Status           string `json:"status"`
+			Additions        int    `json:"additions"`
+			Deletions        int    `json:"deletions"`
+			Changes          int    `json:"changes"`
+			Patch            string `json:"patch"`
+		} `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return RepositoryCommit{}, fmt.Errorf("decode repository commit detail %s: %w", sha, err)
+	}
+
+	commit := RepositoryCommit{
+		SHA:          payload.SHA,
+		AuthorName:   payload.Commit.Author.Name,
+		AuthorEmail:  payload.Commit.Author.Email,
+		CommittedAt:  payload.Commit.Author.Date,
+		Message:      payload.Commit.Message,
+		ParentCount:  len(payload.Parents),
+		Additions:    payload.Stats.Additions,
+		Deletions:    payload.Stats.Deletions,
+		TotalChanges: payload.Stats.Total,
+		Files:        make([]RepositoryCommitFile, 0, len(payload.Files)),
+	}
+	if payload.Author != nil {
+		commit.AuthorGitHubUserID = &payload.Author.ID
+		commit.AuthorUsername = payload.Author.Login
+	}
+
+	for _, file := range payload.Files {
+		var previousPath *string
+		if strings.TrimSpace(file.PreviousFilename) != "" {
+			previousPath = &file.PreviousFilename
+		}
+
+		var patchText *string
+		if strings.TrimSpace(file.Patch) != "" {
+			patchText = &file.Patch
+		}
+
+		changeType := normalizeGitHubFileStatus(file.Status)
+		commit.Files = append(commit.Files, RepositoryCommitFile{
+			Path:         file.Filename,
+			PreviousPath: previousPath,
+			ChangeType:   changeType,
+			Additions:    file.Additions,
+			Deletions:    file.Deletions,
+			Changes:      file.Changes,
+			PatchText:    patchText,
+		})
+	}
+
+	return commit, nil
+}
+
+func normalizeGitHubFileStatus(status string) string {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "removed":
+		return "deleted"
+	default:
+		return strings.TrimSpace(strings.ToLower(status))
+	}
 }
 
 func loadPrivateKey(path string) (*rsa.PrivateKey, error) {

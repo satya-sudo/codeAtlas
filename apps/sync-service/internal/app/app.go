@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -135,6 +136,17 @@ func (a *App) runKafkaConsumer(ctx context.Context) error {
 		)
 
 		if err := a.processRepositorySyncRequested(ctx, event); err != nil {
+			if errors.Is(err, repository.ErrSyncRunNotFound) {
+				a.logger.Info(
+					"skipping stale repository sync request",
+					"sync_run_id", event.SyncRunID,
+					"repository_id", event.RepositoryID,
+				)
+				if err := a.consumer.CommitMessages(ctx, msg); err != nil {
+					return err
+				}
+				continue
+			}
 			a.logger.Error(
 				"process repository sync request",
 				"sync_run_id", event.SyncRunID,
@@ -142,6 +154,17 @@ func (a *App) runKafkaConsumer(ctx context.Context) error {
 				"error", err,
 			)
 			if markErr := a.repos.MarkSyncRunFailed(ctx, event.SyncRunID, event.RepositoryID, err.Error()); markErr != nil {
+				if errors.Is(markErr, repository.ErrSyncRunNotFound) {
+					a.logger.Info(
+						"skipping failure update for stale repository sync request",
+						"sync_run_id", event.SyncRunID,
+						"repository_id", event.RepositoryID,
+					)
+					if err := a.consumer.CommitMessages(ctx, msg); err != nil {
+						return err
+					}
+					continue
+				}
 				a.logger.Error(
 					"mark sync run failed",
 					"sync_run_id", event.SyncRunID,
@@ -180,6 +203,16 @@ func (a *App) processRepositorySyncRequested(ctx context.Context, event events.R
 		return err
 	}
 
+	commits, err := a.github.ListRepositoryCommits(ctx, *repo.InstallationID, repo.Owner, repo.Name)
+	if err != nil {
+		return err
+	}
+
+	commitStats, err := a.repos.ReplaceCommitData(ctx, repo.ID, commits)
+	if err != nil {
+		return err
+	}
+
 	if err := a.repos.MarkSyncRunSucceeded(ctx, event.SyncRunID, event.RepositoryID); err != nil {
 		return err
 	}
@@ -189,6 +222,8 @@ func (a *App) processRepositorySyncRequested(ctx context.Context, event events.R
 		"sync_run_id", event.SyncRunID,
 		"repository_id", event.RepositoryID,
 		"contributors_count", len(contributors),
+		"commits_count", commitStats.CommitsCount,
+		"commit_files_count", commitStats.CommitFilesCount,
 	)
 
 	return nil
