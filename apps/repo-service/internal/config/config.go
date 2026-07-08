@@ -1,9 +1,12 @@
 package config
 
 import (
+	"strings"
 	"time"
 
 	sharedconfig "codeatlas/packages/config"
+	"codeatlas/packages/events"
+	sharedkafka "codeatlas/packages/kafka"
 )
 
 type Config struct {
@@ -21,6 +24,9 @@ type Config struct {
 	GitHubAppClientID              string
 	GitHubAppPrivateKeyPath        string
 	GitHubAPIBaseURL               string
+	KafkaEnabled                   bool
+	KafkaBrokers                   []string
+	RepositorySyncRequestedTopic   string
 }
 
 func Load() (Config, error) {
@@ -49,6 +55,20 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	kafkaEnabled, err := sharedconfig.GetBool("REPO_SERVICE_KAFKA_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+
+	var kafkaBrokers []string
+	kafkaBrokersRaw := strings.TrimSpace(sharedconfig.GetString("KAFKA_BROKERS", "localhost:9092"))
+	if kafkaBrokersRaw != "" {
+		kafkaBrokers, err = sharedkafka.ParseBrokers(kafkaBrokersRaw)
+		if err != nil {
+			return Config{}, err
+		}
+	}
+
 	return Config{
 		ServiceName:                    "repo-service",
 		AppEnv:                         sharedconfig.GetString("APP_ENV", "development"),
@@ -64,5 +84,8 @@ func Load() (Config, error) {
 		GitHubAppClientID:              sharedconfig.GetString("GITHUB_APP_CLIENT_ID", ""),
 		GitHubAppPrivateKeyPath:        sharedconfig.GetString("GITHUB_APP_PRIVATE_KEY_PATH", ""),
 		GitHubAPIBaseURL:               sharedconfig.GetString("GITHUB_API_BASE_URL", "https://api.github.com"),
+		KafkaEnabled:                   kafkaEnabled,
+		KafkaBrokers:                   kafkaBrokers,
+		RepositorySyncRequestedTopic:   sharedconfig.GetString("REPO_SERVICE_SYNC_REQUESTED_TOPIC", events.RepositorySyncRequestedTopic),
 	}, nil
 }

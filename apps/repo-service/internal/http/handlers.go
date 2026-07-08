@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -12,6 +13,8 @@ import (
 	"codeatlas/apps/repo-service/internal/integrations"
 	"codeatlas/apps/repo-service/internal/repos"
 	"codeatlas/apps/repo-service/internal/repository"
+	"codeatlas/packages/events"
+	"codeatlas/packages/kafka"
 )
 
 type Handler struct {
@@ -21,6 +24,7 @@ type Handler struct {
 	installationRepo *repository.InstallationRepository
 	tokenManager     *TokenManager
 	githubApp        *integrations.GitHubApp
+	producer         kafka.Producer
 }
 
 func NewHandler(
@@ -30,6 +34,7 @@ func NewHandler(
 	installationRepo *repository.InstallationRepository,
 	tokenManager *TokenManager,
 	githubApp *integrations.GitHubApp,
+	producer kafka.Producer,
 ) *Handler {
 	return &Handler{
 		config:           config,
@@ -38,6 +43,7 @@ func NewHandler(
 		installationRepo: installationRepo,
 		tokenManager:     tokenManager,
 		githubApp:        githubApp,
+		producer:         producer,
 	}
 }
 
@@ -599,6 +605,32 @@ func (h *Handler) handleRepositorySync(w http.ResponseWriter, r *http.Request, u
 	}
 
 	writeJSON(w, statusCode, result)
+
+	if result.RequestStatus != repos.SyncRequestStatusQueued {
+		return
+	}
+
+	event := events.RepositorySyncRequested{
+		SyncRunID:         result.SyncRun.ID,
+		RepositoryID:      result.SyncRun.RepositoryID,
+		SyncType:          result.SyncRun.SyncType,
+		RequestedByUserID: userID,
+		RequestedAt:       result.SyncRun.CreatedAt,
+	}
+
+	if err := h.producer.Publish(
+		r.Context(),
+		h.config.RepositorySyncRequestedTopic,
+		fmt.Sprintf("%d", result.SyncRun.RepositoryID),
+		event,
+	); err != nil {
+		h.logger.Error(
+			"publish repository sync requested event",
+			"repository_id", repositoryID,
+			"sync_run_id", result.SyncRun.ID,
+			"error", err,
+		)
+	}
 }
 
 func (h *Handler) handleRepositorySyncRuns(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64, tail []string) {

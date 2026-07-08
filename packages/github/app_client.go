@@ -59,6 +59,15 @@ type InstallationRepository struct {
 	} `json:"owner"`
 }
 
+type RepositoryContributor struct {
+	ID            int64   `json:"id"`
+	Login         string  `json:"login"`
+	AvatarURL     string  `json:"avatar_url"`
+	Contributions int     `json:"contributions"`
+	Type          string  `json:"type"`
+	Name          *string `json:"name,omitempty"`
+}
+
 func NewAppClient(cfg AppClientConfig) (*AppClient, error) {
 	apiBaseURL := strings.TrimSpace(cfg.APIBaseURL)
 	if apiBaseURL == "" {
@@ -205,6 +214,59 @@ func (c *AppClient) ListInstallationRepositories(ctx context.Context, installati
 	}
 
 	return payload.Repositories, nil
+}
+
+func (c *AppClient) ListRepositoryContributors(ctx context.Context, installationID int64, owner string, repo string) ([]RepositoryContributor, error) {
+	token, err := c.CreateInstallationToken(ctx, installationID)
+	if err != nil {
+		return nil, err
+	}
+
+	const perPage = 100
+
+	allContributors := make([]RepositoryContributor, 0, perPage)
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf(
+			"%s/repos/%s/%s/contributors?per_page=%d&page=%d",
+			c.apiBaseURL,
+			url.PathEscape(owner),
+			url.PathEscape(repo),
+			perPage,
+			page,
+		)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
+		if err != nil {
+			return nil, fmt.Errorf("build repository contributors request: %w", err)
+		}
+
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("Authorization", "Bearer "+token.Token)
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("request repository contributors page %d: %w", page, err)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			defer resp.Body.Close()
+			return nil, decodeGitHubError(resp)
+		}
+
+		var contributors []RepositoryContributor
+		if err := json.NewDecoder(resp.Body).Decode(&contributors); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("decode repository contributors response page %d: %w", page, err)
+		}
+		resp.Body.Close()
+
+		allContributors = append(allContributors, contributors...)
+		if len(contributors) < perPage {
+			break
+		}
+	}
+
+	return allContributors, nil
 }
 
 func loadPrivateKey(path string) (*rsa.PrivateKey, error) {

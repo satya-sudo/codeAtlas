@@ -12,15 +12,17 @@ import (
 	"codeatlas/apps/repo-service/internal/integrations"
 	"codeatlas/apps/repo-service/internal/repository"
 	"codeatlas/packages/database"
+	"codeatlas/packages/kafka"
 	"codeatlas/packages/logger"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type App struct {
-	config serviceconfig.Config
-	logger *slog.Logger
-	db     *pgxpool.Pool
-	server *http.Server
+	config   serviceconfig.Config
+	logger   *slog.Logger
+	db       *pgxpool.Pool
+	server   *http.Server
+	producer kafka.Producer
 }
 
 func New(ctx context.Context, cfg serviceconfig.Config) (*App, error) {
@@ -43,6 +45,12 @@ func New(ctx context.Context, cfg serviceconfig.Config) (*App, error) {
 	repositoryRepo := repository.NewRepositoryRepository(dbPool)
 	installationRepo := repository.NewInstallationRepository(dbPool)
 	tokenManager := httpapi.NewTokenManager(cfg.JWTSecret)
+	producer := kafka.NewProducer(kafka.ProducerConfig{
+		Logger:   log,
+		Enabled:  cfg.KafkaEnabled,
+		Brokers:  cfg.KafkaBrokers,
+		ClientID: cfg.ServiceName,
+	})
 	githubApp, err := integrations.NewGitHubApp(integrations.GitHubAppConfig{
 		Slug:           cfg.GitHubAppSlug,
 		AppID:          cfg.GitHubAppID,
@@ -55,7 +63,7 @@ func New(ctx context.Context, cfg serviceconfig.Config) (*App, error) {
 	}
 
 	mux := http.NewServeMux()
-	handler := httpapi.NewHandler(cfg, log, repositoryRepo, installationRepo, tokenManager, githubApp)
+	handler := httpapi.NewHandler(cfg, log, repositoryRepo, installationRepo, tokenManager, githubApp, producer)
 	handler.Register(mux)
 
 	server := &http.Server{
@@ -65,10 +73,11 @@ func New(ctx context.Context, cfg serviceconfig.Config) (*App, error) {
 	}
 
 	return &App{
-		config: cfg,
-		logger: log,
-		db:     dbPool,
-		server: server,
+		config:   cfg,
+		logger:   log,
+		db:       dbPool,
+		server:   server,
+		producer: producer,
 	}, nil
 }
 
@@ -90,9 +99,11 @@ func (a *App) Run(ctx context.Context) error {
 
 		a.logger.Info("shutting down")
 		defer a.db.Close()
+		defer a.producer.Close()
 
 		return a.server.Shutdown(shutdownCtx)
 	case err := <-errCh:
+		_ = a.producer.Close()
 		a.db.Close()
 		return err
 	}
