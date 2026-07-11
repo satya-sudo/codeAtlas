@@ -9,5 +9,7 @@ build/
 coverage/
 tmp/
 *.log
+logs/
 apps/frontend/.parcel-cache
-
+/server
+/worker
