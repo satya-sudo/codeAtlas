@@ -7,6 +7,7 @@ import (
 
 	"codeatlas/apps/repo-service/internal/repos"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -277,6 +278,12 @@ func (r *RepositoryRepository) CreateSyncRunForRepository(ctx context.Context, u
 			sync_type,
 			status,
 			error_message,
+			contributors_count,
+			commits_count,
+			commit_files_count,
+			modules_count,
+			files_count,
+			duration_ms,
 			started_at,
 			completed_at,
 			created_at
@@ -289,11 +296,36 @@ func (r *RepositoryRepository) CreateSyncRunForRepository(ctx context.Context, u
 		&run.SyncType,
 		&run.Status,
 		&run.ErrorMessage,
+		&run.Summary.ContributorsCount,
+		&run.Summary.CommitsCount,
+		&run.Summary.CommitFilesCount,
+		&run.Summary.ModulesCount,
+		&run.Summary.FilesCount,
+		&run.Summary.DurationMS,
 		&run.StartedAt,
 		&run.CompletedAt,
 		&run.CreatedAt,
 	)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			_ = tx.Rollback(ctx)
+
+			activeRun, found, activeErr := r.findActiveSyncRunForRepository(ctx, userID, repositoryID)
+			if activeErr != nil {
+				return repos.SyncRunRequestResult{}, fmt.Errorf("re-fetch active sync run after unique violation: %w", activeErr)
+			}
+			if found {
+				requestStatus := repos.SyncRequestStatusAlreadyQueued
+				if activeRun.Status == repos.SyncRunStatusRunning {
+					requestStatus = repos.SyncRequestStatusAlreadyRunning
+				}
+				return repos.SyncRunRequestResult{
+					SyncRun:       activeRun,
+					RequestStatus: requestStatus,
+				}, nil
+			}
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			return repos.SyncRunRequestResult{}, ErrRepositoryNotFound
 		}
@@ -330,6 +362,12 @@ func (r *RepositoryRepository) ListSyncRunsForRepository(ctx context.Context, us
 			sr.sync_type,
 			sr.status,
 			sr.error_message,
+			sr.contributors_count,
+			sr.commits_count,
+			sr.commit_files_count,
+			sr.modules_count,
+			sr.files_count,
+			sr.duration_ms,
 			sr.started_at,
 			sr.completed_at,
 			sr.created_at
@@ -354,6 +392,12 @@ func (r *RepositoryRepository) ListSyncRunsForRepository(ctx context.Context, us
 			&run.SyncType,
 			&run.Status,
 			&run.ErrorMessage,
+			&run.Summary.ContributorsCount,
+			&run.Summary.CommitsCount,
+			&run.Summary.CommitFilesCount,
+			&run.Summary.ModulesCount,
+			&run.Summary.FilesCount,
+			&run.Summary.DurationMS,
 			&run.StartedAt,
 			&run.CompletedAt,
 			&run.CreatedAt,
@@ -378,6 +422,12 @@ func (r *RepositoryRepository) FindSyncRunForRepository(ctx context.Context, use
 			sr.sync_type,
 			sr.status,
 			sr.error_message,
+			sr.contributors_count,
+			sr.commits_count,
+			sr.commit_files_count,
+			sr.modules_count,
+			sr.files_count,
+			sr.duration_ms,
 			sr.started_at,
 			sr.completed_at,
 			sr.created_at
@@ -393,6 +443,12 @@ func (r *RepositoryRepository) FindSyncRunForRepository(ctx context.Context, use
 		&run.SyncType,
 		&run.Status,
 		&run.ErrorMessage,
+		&run.Summary.ContributorsCount,
+		&run.Summary.CommitsCount,
+		&run.Summary.CommitFilesCount,
+		&run.Summary.ModulesCount,
+		&run.Summary.FilesCount,
+		&run.Summary.DurationMS,
 		&run.StartedAt,
 		&run.CompletedAt,
 		&run.CreatedAt,
@@ -457,6 +513,142 @@ func (r *RepositoryRepository) ListContributorsForRepository(ctx context.Context
 	return contributors, nil
 }
 
+func (r *RepositoryRepository) BuildDashboardForRepository(ctx context.Context, userID int64, repositoryID int64) (repos.RepositoryDashboard, error) {
+	repo, err := r.FindRepositoryForUser(ctx, userID, repositoryID)
+	if err != nil {
+		return repos.RepositoryDashboard{}, err
+	}
+
+	runs, err := r.ListSyncRunsForRepository(ctx, userID, repositoryID)
+	if err != nil {
+		return repos.RepositoryDashboard{}, fmt.Errorf("list sync runs for dashboard: %w", err)
+	}
+
+	contributors, err := r.ListContributorsForRepository(ctx, userID, repositoryID)
+	if err != nil {
+		return repos.RepositoryDashboard{}, fmt.Errorf("list contributors for dashboard: %w", err)
+	}
+
+	overview, err := r.buildOverviewForRepository(ctx, userID, repositoryID)
+	if err != nil {
+		return repos.RepositoryDashboard{}, fmt.Errorf("build overview for dashboard: %w", err)
+	}
+
+	hotspots, err := r.listHotspotsForRepository(ctx, userID, repositoryID)
+	if err != nil {
+		return repos.RepositoryDashboard{}, fmt.Errorf("list hotspots for dashboard: %w", err)
+	}
+
+	var latestSyncRun *repos.SyncRun
+	if len(runs) > 0 {
+		latestSyncRun = &runs[0]
+	}
+
+	recentSyncRuns := runs
+	if len(recentSyncRuns) > 5 {
+		recentSyncRuns = recentSyncRuns[:5]
+	}
+
+	topContributors := contributors
+	if len(topContributors) > 5 {
+		topContributors = topContributors[:5]
+	}
+
+	return repos.RepositoryDashboard{
+		Repository:      repo,
+		Overview:        overview,
+		Hotspots:        hotspots,
+		LatestSyncRun:   latestSyncRun,
+		RecentSyncRuns:  recentSyncRuns,
+		TopContributors: topContributors,
+	}, nil
+}
+
+func (r *RepositoryRepository) buildOverviewForRepository(ctx context.Context, userID int64, repositoryID int64) (repos.RepositoryOverview, error) {
+	const query = `
+		SELECT
+			COALESCE((SELECT COUNT(*) FROM commits c WHERE c.repository_id = r.id), 0) AS total_commits,
+			COALESCE((SELECT COUNT(*) FROM repository_contributors rc WHERE rc.repository_id = r.id), 0) AS total_contributors,
+			COALESCE((SELECT COUNT(*) FROM files f WHERE f.repository_id = r.id AND f.is_deleted = FALSE), 0) AS total_files,
+			COALESCE((SELECT COUNT(*) FROM modules m WHERE m.repository_id = r.id), 0) AS total_modules,
+			r.last_synced_at,
+			(
+				SELECT sr.duration_ms
+				FROM repository_sync_runs sr
+				WHERE sr.repository_id = r.id
+				  AND sr.status = 'succeeded'
+				ORDER BY sr.completed_at DESC NULLS LAST, sr.id DESC
+				LIMIT 1
+			) AS latest_sync_duration_ms
+		FROM repositories r
+		INNER JOIN user_repositories ur ON ur.repository_id = r.id
+		WHERE ur.user_id = $1 AND r.id = $2
+	`
+
+	var overview repos.RepositoryOverview
+	err := r.db.QueryRow(ctx, query, userID, repositoryID).Scan(
+		&overview.TotalCommits,
+		&overview.TotalContributors,
+		&overview.TotalFiles,
+		&overview.TotalModules,
+		&overview.LastSyncedAt,
+		&overview.LatestSyncDurationMS,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return repos.RepositoryOverview{}, ErrRepositoryNotFound
+		}
+		return repos.RepositoryOverview{}, fmt.Errorf("query repository overview: %w", err)
+	}
+
+	return overview, nil
+}
+
+func (r *RepositoryRepository) listHotspotsForRepository(ctx context.Context, userID int64, repositoryID int64) ([]repos.RepositoryHotspot, error) {
+	const query = `
+		SELECT
+			cf.path,
+			COUNT(DISTINCT cf.commit_id) AS commit_count,
+			COALESCE(SUM(cf.additions), 0) AS lines_added,
+			COALESCE(SUM(cf.deletions), 0) AS lines_deleted,
+			COALESCE(SUM(cf.changes), 0) AS churn
+		FROM commit_files cf
+		INNER JOIN user_repositories ur ON ur.repository_id = cf.repository_id
+		WHERE ur.user_id = $1
+		  AND cf.repository_id = $2
+		GROUP BY cf.path
+		ORDER BY churn DESC, commit_count DESC, cf.path ASC
+		LIMIT 8
+	`
+
+	rows, err := r.db.Query(ctx, query, userID, repositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("query repository hotspots: %w", err)
+	}
+	defer rows.Close()
+
+	hotspots := make([]repos.RepositoryHotspot, 0, 8)
+	for rows.Next() {
+		var hotspot repos.RepositoryHotspot
+		if err := rows.Scan(
+			&hotspot.Path,
+			&hotspot.CommitCount,
+			&hotspot.LinesAdded,
+			&hotspot.LinesDeleted,
+			&hotspot.Churn,
+		); err != nil {
+			return nil, fmt.Errorf("scan repository hotspot: %w", err)
+		}
+		hotspots = append(hotspots, hotspot)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate repository hotspots: %w", err)
+	}
+
+	return hotspots, nil
+}
+
 func (r *RepositoryRepository) findActiveSyncRunForRepository(ctx context.Context, userID int64, repositoryID int64) (repos.SyncRun, bool, error) {
 	const query = `
 		SELECT
@@ -465,6 +657,12 @@ func (r *RepositoryRepository) findActiveSyncRunForRepository(ctx context.Contex
 			sr.sync_type,
 			sr.status,
 			sr.error_message,
+			sr.contributors_count,
+			sr.commits_count,
+			sr.commit_files_count,
+			sr.modules_count,
+			sr.files_count,
+			sr.duration_ms,
 			sr.started_at,
 			sr.completed_at,
 			sr.created_at
@@ -484,6 +682,12 @@ func (r *RepositoryRepository) findActiveSyncRunForRepository(ctx context.Contex
 		&run.SyncType,
 		&run.Status,
 		&run.ErrorMessage,
+		&run.Summary.ContributorsCount,
+		&run.Summary.CommitsCount,
+		&run.Summary.CommitFilesCount,
+		&run.Summary.ModulesCount,
+		&run.Summary.FilesCount,
+		&run.Summary.DurationMS,
 		&run.StartedAt,
 		&run.CompletedAt,
 		&run.CreatedAt,

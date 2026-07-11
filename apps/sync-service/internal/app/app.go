@@ -121,6 +121,13 @@ func (a *App) runKafkaConsumer(ctx context.Context) error {
 			return err
 		}
 
+		a.logger.Debug(
+			"fetched kafka message",
+			"topic", msg.Topic,
+			"key", string(msg.Key),
+			"payload_bytes", len(msg.Value),
+		)
+
 		var event events.RepositorySyncRequested
 		if err := json.Unmarshal(msg.Value, &event); err != nil {
 			a.logger.Error("decode repository sync event", "error", err, "payload", string(msg.Value))
@@ -130,6 +137,7 @@ func (a *App) runKafkaConsumer(ctx context.Context) error {
 		a.logger.Info(
 			"received repository sync request",
 			"sync_run_id", event.SyncRunID,
+			"sync_run_created_at", event.SyncRunCreatedAt,
 			"repository_id", event.RepositoryID,
 			"sync_type", event.SyncType,
 			"requested_by_user_id", event.RequestedByUserID,
@@ -153,11 +161,12 @@ func (a *App) runKafkaConsumer(ctx context.Context) error {
 				"repository_id", event.RepositoryID,
 				"error", err,
 			)
-			if markErr := a.repos.MarkSyncRunFailed(ctx, event.SyncRunID, event.RepositoryID, err.Error()); markErr != nil {
+			if markErr := a.repos.MarkSyncRunFailed(ctx, event.SyncRunID, event.RepositoryID, event.SyncRunCreatedAt, err.Error()); markErr != nil {
 				if errors.Is(markErr, repository.ErrSyncRunNotFound) {
 					a.logger.Info(
 						"skipping failure update for stale repository sync request",
 						"sync_run_id", event.SyncRunID,
+						"sync_run_created_at", event.SyncRunCreatedAt,
 						"repository_id", event.RepositoryID,
 					)
 					if err := a.consumer.CommitMessages(ctx, msg); err != nil {
@@ -181,49 +190,113 @@ func (a *App) runKafkaConsumer(ctx context.Context) error {
 }
 
 func (a *App) processRepositorySyncRequested(ctx context.Context, event events.RepositorySyncRequested) error {
+	syncStartedAt := time.Now()
+
 	repo, err := a.repos.FindRepositoryForSync(ctx, event.RepositoryID)
 	if err != nil {
 		return err
 	}
 
+	a.logger.Debug(
+		"resolved repository for sync",
+		"sync_run_id", event.SyncRunID,
+		"sync_run_created_at", event.SyncRunCreatedAt,
+		"repository_id", repo.ID,
+		"repository_name", repo.Owner+"/"+repo.Name,
+		"installation_id", repo.InstallationID,
+	)
+
 	if repo.InstallationID == nil || *repo.InstallationID == 0 {
 		return fmt.Errorf("repository %d has no github app installation id", repo.ID)
 	}
 
-	if err := a.repos.MarkSyncRunRunning(ctx, event.SyncRunID, event.RepositoryID); err != nil {
+	if err := a.repos.MarkSyncRunRunning(ctx, event.SyncRunID, event.RepositoryID, event.SyncRunCreatedAt); err != nil {
 		return err
 	}
 
+	a.logger.Debug(
+		"marked sync run running",
+		"sync_run_id", event.SyncRunID,
+		"sync_run_created_at", event.SyncRunCreatedAt,
+		"repository_id", event.RepositoryID,
+	)
+
+	contributorsStartedAt := time.Now()
 	contributors, err := a.github.ListRepositoryContributors(ctx, *repo.InstallationID, repo.Owner, repo.Name)
 	if err != nil {
 		return err
 	}
+	a.logger.Debug(
+		"fetched repository contributors",
+		"sync_run_id", event.SyncRunID,
+		"repository_id", event.RepositoryID,
+		"repository_name", repo.Owner+"/"+repo.Name,
+		"contributors_count", len(contributors),
+		"duration_ms", time.Since(contributorsStartedAt).Milliseconds(),
+	)
 
 	if err := a.repos.ReplaceContributors(ctx, repo.ID, contributors); err != nil {
 		return err
 	}
+	a.logger.Debug(
+		"stored repository contributors",
+		"sync_run_id", event.SyncRunID,
+		"repository_id", event.RepositoryID,
+		"contributors_count", len(contributors),
+	)
 
+	commitsStartedAt := time.Now()
 	commits, err := a.github.ListRepositoryCommits(ctx, *repo.InstallationID, repo.Owner, repo.Name)
 	if err != nil {
 		return err
 	}
+	a.logger.Debug(
+		"fetched repository commits",
+		"sync_run_id", event.SyncRunID,
+		"repository_id", event.RepositoryID,
+		"repository_name", repo.Owner+"/"+repo.Name,
+		"commits_count", len(commits),
+		"duration_ms", time.Since(commitsStartedAt).Milliseconds(),
+	)
 
+	commitWriteStartedAt := time.Now()
 	commitStats, err := a.repos.ReplaceCommitData(ctx, repo.ID, commits)
 	if err != nil {
 		return err
 	}
+	a.logger.Debug(
+		"stored repository commit data",
+		"sync_run_id", event.SyncRunID,
+		"repository_id", event.RepositoryID,
+		"commits_count", commitStats.CommitsCount,
+		"commit_files_count", commitStats.CommitFilesCount,
+		"duration_ms", time.Since(commitWriteStartedAt).Milliseconds(),
+	)
 
-	if err := a.repos.MarkSyncRunSucceeded(ctx, event.SyncRunID, event.RepositoryID); err != nil {
+	summary := repository.SyncRunSummary{
+		ContributorsCount: len(contributors),
+		CommitsCount:      commitStats.CommitsCount,
+		CommitFilesCount:  commitStats.CommitFilesCount,
+		ModulesCount:      commitStats.ModulesCount,
+		FilesCount:        commitStats.FilesCount,
+		DurationMS:        time.Since(syncStartedAt).Milliseconds(),
+	}
+
+	if err := a.repos.MarkSyncRunSucceeded(ctx, event.SyncRunID, event.RepositoryID, event.SyncRunCreatedAt, summary); err != nil {
 		return err
 	}
 
 	a.logger.Info(
 		"completed repository sync request",
 		"sync_run_id", event.SyncRunID,
+		"sync_run_created_at", event.SyncRunCreatedAt,
 		"repository_id", event.RepositoryID,
 		"contributors_count", len(contributors),
 		"commits_count", commitStats.CommitsCount,
 		"commit_files_count", commitStats.CommitFilesCount,
+		"modules_count", commitStats.ModulesCount,
+		"files_count", commitStats.FilesCount,
+		"duration_ms", summary.DurationMS,
 	)
 
 	return nil

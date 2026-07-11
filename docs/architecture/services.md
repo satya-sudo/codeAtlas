@@ -20,6 +20,7 @@
 - Validates webhook signature
 - Normalizes payloads into internal events
 - Publishes to Kafka
+- Currently accepts `ping` and `push` events, and publishes normalized `push` events
 
 ## Internal Processing Services
 
@@ -49,4 +50,3 @@
 - Analytics are computed asynchronously
 - Graph projection is decoupled from relational analytics
 - GitHub payload normalization happens once
-

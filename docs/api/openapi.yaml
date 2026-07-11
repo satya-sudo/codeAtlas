@@ -230,6 +230,8 @@ components:
         error_message:
           type: string
           nullable: true
+        summary:
+          $ref: '#/components/schemas/SyncRunSummary'
         started_at:
           type: string
           format: date-time
@@ -241,6 +243,24 @@ components:
         created_at:
           type: string
           format: date-time
+    SyncRunSummary:
+      type: object
+      required: [contributors_count, commits_count, commit_files_count, modules_count, files_count]
+      properties:
+        contributors_count:
+          type: integer
+        commits_count:
+          type: integer
+        commit_files_count:
+          type: integer
+        modules_count:
+          type: integer
+        files_count:
+          type: integer
+        duration_ms:
+          type: integer
+          format: int64
+          nullable: true
     SyncRunResponse:
       type: object
       required: [sync_run]
@@ -293,6 +313,30 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Contributor'
+    RepositoryDashboard:
+      type: object
+      required: [repository, recent_sync_runs, top_contributors]
+      properties:
+        repository:
+          $ref: '#/components/schemas/Repository'
+        latest_sync_run:
+          allOf:
+            - $ref: '#/components/schemas/SyncRun'
+          nullable: true
+        recent_sync_runs:
+          type: array
+          items:
+            $ref: '#/components/schemas/SyncRun'
+        top_contributors:
+          type: array
+          items:
+            $ref: '#/components/schemas/Contributor'
+    RepositoryDashboardResponse:
+      type: object
+      required: [dashboard]
+      properties:
+        dashboard:
+          $ref: '#/components/schemas/RepositoryDashboard'
     ConnectRepositoryRequest:
       type: object
       required: [github_repo_id, owner, name, default_branch]
@@ -738,3 +782,28 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ContributorListResponse'
+  /repos/{repositoryId}/dashboard:
+    get:
+      summary: Get the first repository dashboard view for a connected repository
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: repositoryId
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Repository dashboard aggregate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepositoryDashboardResponse'
+        '404':
+          description: Repository not found for current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'

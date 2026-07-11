@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	serviceconfig "codeatlas/apps/repo-service/internal/config"
 	"codeatlas/apps/repo-service/internal/integrations"
@@ -554,6 +555,8 @@ func (h *Handler) handleRepositoryByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch parts[1] {
+	case "dashboard":
+		h.handleRepositoryDashboard(w, r, userID, repositoryID)
 	case "sync":
 		h.handleRepositorySync(w, r, userID, repositoryID)
 	case "sync-runs":
@@ -565,6 +568,36 @@ func (h *Handler) handleRepositoryByID(w http.ResponseWriter, r *http.Request) {
 			"error": "route not found",
 		})
 	}
+}
+
+func (h *Handler) handleRepositoryDashboard(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	dashboard, err := h.repositoryRepo.BuildDashboardForRepository(r.Context(), userID, repositoryID)
+	if err != nil {
+		if errors.Is(err, repository.ErrRepositoryNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "repository not found",
+			})
+			return
+		}
+
+		h.logger.Error("build repository dashboard", "repository_id", repositoryID, "user_id", userID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to build repository dashboard",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"dashboard": dashboard,
+	})
 }
 
 func (h *Handler) handleRepositorySync(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64) {
@@ -583,6 +616,14 @@ func (h *Handler) handleRepositorySync(w http.ResponseWriter, r *http.Request, u
 	if strings.TrimSpace(payload.SyncType) == "" {
 		payload.SyncType = repos.SyncTypeInitial
 	}
+
+	requestStartedAt := time.Now()
+	h.logger.Debug(
+		"queue repository sync requested",
+		"repository_id", repositoryID,
+		"user_id", userID,
+		"sync_type", payload.SyncType,
+	)
 
 	result, err := h.repositoryRepo.CreateSyncRunForRepository(r.Context(), userID, repositoryID, payload.SyncType)
 	if err != nil {
@@ -604,6 +645,16 @@ func (h *Handler) handleRepositorySync(w http.ResponseWriter, r *http.Request, u
 		statusCode = http.StatusOK
 	}
 
+	h.logger.Info(
+		"repository sync queued result",
+		"repository_id", repositoryID,
+		"user_id", userID,
+		"sync_run_id", result.SyncRun.ID,
+		"sync_type", result.SyncRun.SyncType,
+		"request_status", result.RequestStatus,
+		"duration_ms", time.Since(requestStartedAt).Milliseconds(),
+	)
+
 	writeJSON(w, statusCode, result)
 
 	if result.RequestStatus != repos.SyncRequestStatusQueued {
@@ -612,6 +663,7 @@ func (h *Handler) handleRepositorySync(w http.ResponseWriter, r *http.Request, u
 
 	event := events.RepositorySyncRequested{
 		SyncRunID:         result.SyncRun.ID,
+		SyncRunCreatedAt:  result.SyncRun.CreatedAt,
 		RepositoryID:      result.SyncRun.RepositoryID,
 		SyncType:          result.SyncRun.SyncType,
 		RequestedByUserID: userID,
@@ -630,7 +682,16 @@ func (h *Handler) handleRepositorySync(w http.ResponseWriter, r *http.Request, u
 			"sync_run_id", result.SyncRun.ID,
 			"error", err,
 		)
+		return
 	}
+
+	h.logger.Info(
+		"published repository sync requested event",
+		"repository_id", repositoryID,
+		"sync_run_id", result.SyncRun.ID,
+		"topic", h.config.RepositorySyncRequestedTopic,
+		"key", result.SyncRun.RepositoryID,
+	)
 }
 
 func (h *Handler) handleRepositorySyncRuns(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64, tail []string) {

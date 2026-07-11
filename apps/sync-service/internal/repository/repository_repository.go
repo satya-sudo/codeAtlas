@@ -33,6 +33,17 @@ type RepositoryRepository struct {
 type CommitImportStats struct {
 	CommitsCount     int
 	CommitFilesCount int
+	ModulesCount     int
+	FilesCount       int
+}
+
+type SyncRunSummary struct {
+	ContributorsCount int
+	CommitsCount      int
+	CommitFilesCount  int
+	ModulesCount      int
+	FilesCount        int
+	DurationMS        int64
 }
 
 func NewRepositoryRepository(db *pgxpool.Pool) *RepositoryRepository {
@@ -64,7 +75,7 @@ func (r *RepositoryRepository) FindRepositoryForSync(ctx context.Context, reposi
 	return repo, nil
 }
 
-func (r *RepositoryRepository) MarkSyncRunRunning(ctx context.Context, syncRunID int64, repositoryID int64) error {
+func (r *RepositoryRepository) MarkSyncRunRunning(ctx context.Context, syncRunID int64, repositoryID int64, expectedCreatedAt time.Time) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin mark running transaction: %w", err)
@@ -73,9 +84,17 @@ func (r *RepositoryRepository) MarkSyncRunRunning(ctx context.Context, syncRunID
 
 	tag, err := tx.Exec(
 		ctx,
-		`UPDATE repository_sync_runs SET status = 'running', started_at = NOW(), error_message = NULL WHERE id = $1 AND repository_id = $2`,
+		`UPDATE repository_sync_runs
+		 SET status = 'running',
+		     started_at = NOW(),
+		     error_message = NULL
+		 WHERE id = $1
+		   AND repository_id = $2
+		   AND created_at = $3
+		   AND status = 'queued'`,
 		syncRunID,
 		repositoryID,
+		expectedCreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("mark sync run running: %w", err)
@@ -280,6 +299,7 @@ func (r *RepositoryRepository) ReplaceCommitData(ctx context.Context, repository
 					return CommitImportStats{}, fmt.Errorf("insert module %s: %w", moduleName, err)
 				}
 				moduleIDs[moduleKey] = moduleID
+				stats.ModulesCount++
 			}
 
 			fileID, ok := fileIDs[changedFile.Path]
@@ -300,6 +320,7 @@ func (r *RepositoryRepository) ReplaceCommitData(ctx context.Context, repository
 					return CommitImportStats{}, fmt.Errorf("insert file %s: %w", changedFile.Path, err)
 				}
 				fileIDs[changedFile.Path] = fileID
+				stats.FilesCount++
 			} else {
 				if _, err := tx.Exec(
 					ctx,
@@ -350,7 +371,7 @@ func (r *RepositoryRepository) ReplaceCommitData(ctx context.Context, repository
 	return stats, nil
 }
 
-func (r *RepositoryRepository) MarkSyncRunSucceeded(ctx context.Context, syncRunID int64, repositoryID int64) error {
+func (r *RepositoryRepository) MarkSyncRunSucceeded(ctx context.Context, syncRunID int64, repositoryID int64, expectedCreatedAt time.Time, summary SyncRunSummary) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin mark succeeded transaction: %w", err)
@@ -359,9 +380,29 @@ func (r *RepositoryRepository) MarkSyncRunSucceeded(ctx context.Context, syncRun
 
 	tag, err := tx.Exec(
 		ctx,
-		`UPDATE repository_sync_runs SET status = 'succeeded', completed_at = NOW(), error_message = NULL WHERE id = $1 AND repository_id = $2`,
+		`UPDATE repository_sync_runs
+		 SET status = 'succeeded',
+		     completed_at = NOW(),
+		     error_message = NULL,
+		     contributors_count = $3,
+		     commits_count = $4,
+		     commit_files_count = $5,
+		     modules_count = $6,
+		     files_count = $7,
+		     duration_ms = $8
+		 WHERE id = $1
+		   AND repository_id = $2
+		   AND created_at = $9
+		   AND status = 'running'`,
 		syncRunID,
 		repositoryID,
+		summary.ContributorsCount,
+		summary.CommitsCount,
+		summary.CommitFilesCount,
+		summary.ModulesCount,
+		summary.FilesCount,
+		summary.DurationMS,
+		expectedCreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("mark sync run succeeded: %w", err)
@@ -385,7 +426,7 @@ func (r *RepositoryRepository) MarkSyncRunSucceeded(ctx context.Context, syncRun
 	return nil
 }
 
-func (r *RepositoryRepository) MarkSyncRunFailed(ctx context.Context, syncRunID int64, repositoryID int64, message string) error {
+func (r *RepositoryRepository) MarkSyncRunFailed(ctx context.Context, syncRunID int64, repositoryID int64, expectedCreatedAt time.Time, message string) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin mark failed transaction: %w", err)
@@ -394,10 +435,22 @@ func (r *RepositoryRepository) MarkSyncRunFailed(ctx context.Context, syncRunID 
 
 	tag, err := tx.Exec(
 		ctx,
-		`UPDATE repository_sync_runs SET status = 'failed', completed_at = NOW(), error_message = $3 WHERE id = $1 AND repository_id = $2`,
+		`UPDATE repository_sync_runs
+		 SET status = 'failed',
+		     completed_at = NOW(),
+		     error_message = $3,
+		     duration_ms = CASE
+		         WHEN started_at IS NULL THEN duration_ms
+		         ELSE GREATEST((EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000)::BIGINT, 0)
+		     END
+		 WHERE id = $1
+		   AND repository_id = $2
+		   AND created_at = $4
+		   AND status IN ('queued', 'running')`,
 		syncRunID,
 		repositoryID,
 		message,
+		expectedCreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("mark sync run failed: %w", err)

@@ -10,6 +10,7 @@ const CONFIG = {
 
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem(CONFIG.tokenStorageKey) || "");
+  const [route, setRoute] = useState(() => getCurrentRoute());
   const [user, setUser] = useState(null);
   const [authError, setAuthError] = useState("");
   const [toast, setToast] = useState("");
@@ -38,6 +39,18 @@ function App() {
   const [syncActionErrorByRepo, setSyncActionErrorByRepo] = useState({});
   const [connectStatus, setConnectStatus] = useState("idle");
   const [connectError, setConnectError] = useState("");
+  const [dashboardStatus, setDashboardStatus] = useState("idle");
+  const [dashboardError, setDashboardError] = useState("");
+  const [dashboardData, setDashboardData] = useState(null);
+
+  useEffect(() => {
+    const onPopState = () => {
+      setRoute(getCurrentRoute());
+    };
+
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
 
   useEffect(() => {
     const currentUrl = new URL(window.location.href);
@@ -503,6 +516,73 @@ function App() {
     return () => window.clearInterval(timer);
   }, [token, user, deduplicatedConnectedRepositories.length]);
 
+  useEffect(() => {
+    if (!token || !user || route.view !== "dashboard" || !route.repositoryId) {
+      if (route.view !== "dashboard") {
+        setDashboardData(null);
+        setDashboardStatus("idle");
+        setDashboardError("");
+      }
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadDashboard() {
+      setDashboardStatus("loading");
+      setDashboardError("");
+
+      try {
+        const response = await fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/dashboard`, {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
+
+        if (response.status === 401) {
+          localStorage.removeItem(CONFIG.tokenStorageKey);
+          if (!cancelled) {
+            resetSession("Session expired. Sign in again.");
+          }
+          return;
+        }
+
+        if (response.status === 404) {
+          if (!cancelled) {
+            setDashboardData(null);
+            setDashboardStatus("failed");
+            setDashboardError("This repository is not available in your workspace yet.");
+          }
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error(`dashboard request failed with status ${response.status}`);
+        }
+
+        const payload = await response.json();
+        if (!cancelled) {
+          setDashboardData(payload.dashboard);
+          setDashboardStatus("ready");
+          setDashboardError("");
+        }
+      } catch (error) {
+        console.error(error);
+        if (!cancelled) {
+          setDashboardData(null);
+          setDashboardStatus("failed");
+          setDashboardError("Could not load the repository dashboard.");
+        }
+      }
+    }
+
+    loadDashboard();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, user, route]);
+
   const setupSummary = useMemo(
     () => getSetupSummary(user, installations, selectedInstallation, selectedRepository, deduplicatedConnectedRepositories),
     [user, installations, selectedInstallation, selectedRepository, deduplicatedConnectedRepositories]
@@ -510,6 +590,7 @@ function App() {
 
   function resetSession(message) {
     setToken("");
+    setRoute(getCurrentRoute());
     setUser(null);
     setAuthError(message);
     setInstallations([]);
@@ -523,6 +604,7 @@ function App() {
   const handleLogout = () => {
     localStorage.removeItem(CONFIG.tokenStorageKey);
     setToken("");
+    navigateToRoute("/");
     setUser(null);
     setAuthError("");
     setToast("Signed out.");
@@ -689,6 +771,19 @@ function App() {
     }
   };
 
+  const navigateToRoute = (path) => {
+    window.history.pushState({}, "", path);
+    setRoute(getCurrentRoute());
+  };
+
+  const openRepositoryDashboard = (repoId) => {
+    navigateToRoute(`/repos/${repoId}/dashboard`);
+  };
+
+  const returnToRepositories = () => {
+    navigateToRoute("/");
+  };
+
   if (!user) {
     return (
       <>
@@ -743,6 +838,14 @@ function App() {
             <span>Engineering Intelligence</span>
           </div>
 
+          <div className="topbar-nav">
+            {route.view === "dashboard" ? (
+              <button type="button" className="link-button topbar-back" onClick={returnToRepositories}>
+                ← Repositories
+              </button>
+            ) : null}
+          </div>
+
           <div className="topbar-user">
             <div className="avatar-shell">
               {user.avatar_url ? <img src={user.avatar_url} alt={user.username} /> : <span>{user.username.slice(0, 1).toUpperCase()}</span>}
@@ -757,6 +860,15 @@ function App() {
         </header>
 
         <main className="page-body">
+          {route.view === "dashboard" ? (
+            <RepositoryDashboardPage
+              dashboard={dashboardData}
+              status={dashboardStatus}
+              error={dashboardError}
+              onBack={returnToRepositories}
+            />
+          ) : (
+            <>
           <section className="page-intro">
             <span className="eyebrow">Repository onboarding</span>
             <h1>Connect your first repository</h1>
@@ -937,25 +1049,30 @@ function App() {
                       <div className="connected-repo-card" key={repo.id}>
                         <div className="connected-repo-head">
                           <div>
-                            <strong>{repo.full_name}</strong>
+                            <button type="button" className="repo-link-button" onClick={() => openRepositoryDashboard(repo.id)}>
+                              {repo.full_name}
+                            </button>
                             <p>{getRepositorySyncHeadline(repo, latestSyncRunsByRepo[repo.id])}</p>
                           </div>
-                          <button
-                            type="button"
-                            className={`button button-secondary button-small ${syncActionStatusByRepo[repo.id] === "loading" || isSyncActive(latestSyncRunsByRepo[repo.id]) ? "is-disabled" : ""}`}
-                            disabled={syncActionStatusByRepo[repo.id] === "loading" || isSyncActive(latestSyncRunsByRepo[repo.id])}
-                            onClick={() => handleQueueSync(repo)}
-                          >
-                            {syncActionStatusByRepo[repo.id] === "loading" ? "Queueing..." : isSyncActive(latestSyncRunsByRepo[repo.id]) ? "Sync active" : "Queue sync"}
-                          </button>
+                          <div className="connected-repo-actions">
+                            <button type="button" className="button button-secondary button-small" onClick={() => openRepositoryDashboard(repo.id)}>
+                              Open dashboard
+                            </button>
+                            <button
+                              type="button"
+                              className={`button button-secondary button-small ${syncActionStatusByRepo[repo.id] === "loading" || isSyncActive(latestSyncRunsByRepo[repo.id]) ? "is-disabled" : ""}`}
+                              disabled={syncActionStatusByRepo[repo.id] === "loading" || isSyncActive(latestSyncRunsByRepo[repo.id])}
+                              onClick={() => handleQueueSync(repo)}
+                            >
+                              {syncActionStatusByRepo[repo.id] === "loading" ? "Queueing..." : isSyncActive(latestSyncRunsByRepo[repo.id]) ? "Sync active" : "Queue sync"}
+                            </button>
+                          </div>
                         </div>
                         <div className="sync-run-summary">
                           <span className={`sync-run-pill sync-run-${latestSyncRunsByRepo[repo.id]?.status || "none"}`}>
-                            {latestSyncRunsByRepo[repo.id]?.status || "no sync run yet"}
+                            {getSyncRunPillLabel(latestSyncRunsByRepo[repo.id])}
                           </span>
-                          {latestSyncRunsByRepo[repo.id]?.sync_type ? (
-                            <span className="sync-run-meta">Latest run: {latestSyncRunsByRepo[repo.id].sync_type}</span>
-                          ) : null}
+                          <span className="sync-run-meta">{getSyncRunMeta(repo, latestSyncRunsByRepo[repo.id])}</span>
                         </div>
                         <div className="repository-tags tight-tags">
                           <span>{repo.is_private ? "Private" : "Public"}</span>
@@ -980,11 +1097,276 @@ function App() {
           </section>
 
           {installationState.error || authError ? <section className="inline-alert">{installationState.error || authError}</section> : null}
+            </>
+          )}
         </main>
       </div>
 
       <div className={`toast ${toast ? "is-visible" : ""}`}>{toast}</div>
     </>
+  );
+}
+
+function RepositoryDashboardPage({ dashboard, status, error, onBack }) {
+  if (status === "loading") {
+    return (
+      <section className="dashboard-shell">
+        <div className="dashboard-empty-state">
+          <strong>Loading repository dashboard…</strong>
+          <p>Fetching repo metadata, sync history, and contributor details.</p>
+        </div>
+      </section>
+    );
+  }
+
+  if (status === "failed") {
+    return (
+      <section className="dashboard-shell">
+        <div className="dashboard-empty-state">
+          <strong>Dashboard unavailable</strong>
+          <p>{error || "We could not load this repository right now."}</p>
+          <button type="button" className="button button-secondary button-small" onClick={onBack}>
+            Back to repositories
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (!dashboard) {
+    return null;
+  }
+
+  const repo = dashboard.repository;
+  const latestSyncRun = dashboard.latest_sync_run;
+  const recentSyncRuns = dashboard.recent_sync_runs || [];
+  const topContributors = dashboard.top_contributors || [];
+  const highlights = getDashboardHighlights(repo, latestSyncRun, topContributors);
+  const metrics = getDashboardMetrics(repo, latestSyncRun, recentSyncRuns, topContributors);
+
+  return (
+    <section className="dashboard-shell">
+      <section className="dashboard-hero">
+        <div className="dashboard-hero-copy">
+          <div className="dashboard-breadcrumb">
+            <button type="button" className="link-button" onClick={onBack}>
+              Repositories
+            </button>
+            <span>/</span>
+            <span>{repo.name}</span>
+          </div>
+          <div className="dashboard-title-row">
+            <h1>{repo.name}</h1>
+            <div className="dashboard-badges">
+              <span className="dashboard-badge dashboard-badge-primary">{formatSyncStatusForBadge(repo.sync_status)}</span>
+              <span className="dashboard-badge">{repo.is_private ? "Private repo" : "Public repo"}</span>
+              <span className="dashboard-badge dashboard-badge-muted">Env not connected</span>
+              <span className="dashboard-badge dashboard-badge-muted">Version unavailable</span>
+            </div>
+          </div>
+          <p className="dashboard-subtitle">{repo.full_name}</p>
+          <p className="dashboard-description">
+            This is the first repository dashboard view for <strong>{repo.name}</strong>. It uses only the repository metadata,
+            sync history, and contributor data that CodeAtlas already stores safely today.
+          </p>
+        </div>
+
+        <div className="dashboard-hero-meta">
+          <div className="hero-meta-card">
+            <span>Default branch</span>
+            <strong>{repo.default_branch}</strong>
+          </div>
+          <div className="hero-meta-card">
+            <span>Last updated</span>
+            <strong>{formatRelativeDate(repo.last_synced_at || repo.updated_at)}</strong>
+          </div>
+          <div className="hero-meta-card">
+            <span>Latest sync</span>
+            <strong>{latestSyncRun ? formatSyncStatusForBadge(latestSyncRun.status) : "Not synced yet"}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="dashboard-welcome">
+        <div>
+          <span className="eyebrow">Welcome summary</span>
+          <h2>{repo.name} at a glance</h2>
+          <p>
+            A safe first dashboard focused on what CodeAtlas knows for sure right now: sync health, mapped codebase size, and
+            contributor ownership signals.
+          </p>
+        </div>
+        <div className="dashboard-highlight-list">
+          {highlights.map((highlight) => (
+            <div className="dashboard-highlight-card" key={highlight.title}>
+              <strong>{highlight.title}</strong>
+              <p>{highlight.body}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="dashboard-kpi-grid">
+        {metrics.map((metric) => (
+          <div className="dashboard-kpi-card" key={metric.label}>
+            <span>{metric.label}</span>
+            <strong>{metric.value}</strong>
+            <p>{metric.meta}</p>
+          </div>
+        ))}
+      </section>
+
+      <section className="dashboard-main-grid">
+        <div className="dashboard-main-column">
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <h3>Repository overview</h3>
+                <p>Real metadata and sync signals that are safely available today.</p>
+              </div>
+            </div>
+            <div className="dashboard-overview-grid">
+              <div className="overview-item">
+                <span>Repository</span>
+                <strong>{repo.full_name}</strong>
+              </div>
+              <div className="overview-item">
+                <span>Sync state</span>
+                <strong>{formatSyncStatusForBadge(repo.sync_status)}</strong>
+              </div>
+              <div className="overview-item">
+                <span>Environment</span>
+                <strong>Not connected yet</strong>
+              </div>
+              <div className="overview-item">
+                <span>Version</span>
+                <strong>Coming soon</strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <h3>Recent sync activity</h3>
+                <p>Latest import attempts recorded by CodeAtlas.</p>
+              </div>
+            </div>
+
+            {recentSyncRuns.length === 0 ? (
+              <div className="dashboard-empty-panel">
+                <strong>No sync history yet</strong>
+                <p>Queue the first sync from the repository list to populate operational history here.</p>
+              </div>
+            ) : (
+              <div className="dashboard-sync-list">
+                {recentSyncRuns.map((run) => (
+                  <div className="dashboard-sync-row" key={run.id}>
+                    <div>
+                      <strong>{formatSyncStatusForBadge(run.status)}</strong>
+                      <p>{formatSyncRunDetail(run)}</p>
+                    </div>
+                    <div className="dashboard-sync-meta">
+                      <span>{formatRelativeDate(run.completed_at || run.started_at || run.created_at)}</span>
+                      <code>{run.sync_type}</code>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <h3>Contributors</h3>
+                <p>Top contributors from the most recent synced contributor data.</p>
+              </div>
+            </div>
+
+            {topContributors.length === 0 ? (
+              <div className="dashboard-empty-panel">
+                <strong>No contributor data yet</strong>
+                <p>Contributor ownership appears here after the repository completes its first sync.</p>
+              </div>
+            ) : (
+              <div className="dashboard-contributor-list">
+                {topContributors.map((contributor) => (
+                  <div className="dashboard-contributor-row" key={contributor.id}>
+                    <div className="dashboard-contributor-id">
+                      <div className="dashboard-contributor-avatar">
+                        {contributor.avatar_url ? <img src={contributor.avatar_url} alt={contributor.username} /> : contributor.username.slice(0, 1).toUpperCase()}
+                      </div>
+                      <div>
+                        <strong>{contributor.username}</strong>
+                        <p>{formatContributionLabel(contributor.contributions_count)}</p>
+                      </div>
+                    </div>
+                    <span className="dashboard-contributor-count">{contributor.contributions_count}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+
+        <aside className="dashboard-side-column">
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <h3>Operational highlights</h3>
+                <p>High-value facts we can source safely right now.</p>
+              </div>
+            </div>
+            <div className="dashboard-aside-list">
+              <div className="aside-item">
+                <span>Last sync duration</span>
+                <strong>{formatDuration(latestSyncRun?.summary?.duration_ms)}</strong>
+              </div>
+              <div className="aside-item">
+                <span>Files mapped</span>
+                <strong>{formatCount(latestSyncRun?.summary?.files_count)}</strong>
+              </div>
+              <div className="aside-item">
+                <span>Modules mapped</span>
+                <strong>{formatCount(latestSyncRun?.summary?.modules_count)}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <h3>Waiting on integrations</h3>
+                <p>Reserved space for approved future connections.</p>
+              </div>
+            </div>
+            <div className="dashboard-placeholder-list">
+              <div className="placeholder-item">
+                <strong>Environment</strong>
+                <p>Not connected yet</p>
+              </div>
+              <div className="placeholder-item">
+                <strong>Version / release</strong>
+                <p>Not tracked yet</p>
+              </div>
+              <div className="placeholder-item">
+                <strong>Open PRs</strong>
+                <p>Coming soon through safe GitHub sync</p>
+              </div>
+              <div className="placeholder-item">
+                <strong>Issues</strong>
+                <p>Coming soon through safe GitHub sync</p>
+              </div>
+              <div className="placeholder-item">
+                <strong>Deployments</strong>
+                <p>Unavailable until a safe deployment integration is approved</p>
+              </div>
+            </div>
+          </section>
+        </aside>
+      </section>
+    </section>
   );
 }
 
@@ -1033,10 +1415,16 @@ function isSyncActive(syncRun) {
 
 function getRepositorySyncHeadline(repo, latestSyncRun) {
   if (latestSyncRun?.status === "queued") {
-    return "Queued";
+    return "Sync queued";
   }
   if (latestSyncRun?.status === "running") {
-    return "Importing";
+    return "Sync in progress";
+  }
+  if (latestSyncRun?.status === "succeeded") {
+    return "Ready";
+  }
+  if (latestSyncRun?.status === "failed") {
+    return "Last sync failed";
   }
 
   switch ((repo.sync_status || "").toLowerCase()) {
@@ -1047,9 +1435,271 @@ function getRepositorySyncHeadline(repo, latestSyncRun) {
     case "failed":
       return "Failed";
     case "pending":
-      return "Pending";
+      return "Connected, not synced yet";
     default:
       return "Connected";
+  }
+}
+
+function getCurrentRoute() {
+  const pathname = window.location.pathname || "/";
+  const match = pathname.match(/^\/repos\/(\d+)(?:\/dashboard)?\/?$/);
+  if (match) {
+    return {
+      view: "dashboard",
+      repositoryId: match[1]
+    };
+  }
+
+  return {
+    view: "onboarding",
+    repositoryId: ""
+  };
+}
+
+function getDashboardHighlights(repo, latestSyncRun, topContributors) {
+  const topContributor = topContributors[0];
+
+  return [
+    {
+      title: latestSyncRun ? `Latest sync is ${formatSyncStatusForBadge(latestSyncRun.status).toLowerCase()}` : "No sync completed yet",
+      body: latestSyncRun
+        ? `The most recent ${latestSyncRun.sync_type} sync ${getSyncTimingSummary(latestSyncRun)}.`
+        : "Queue the first sync to populate commit, file, module, and contributor insights."
+    },
+    {
+      title: latestSyncRun?.summary?.files_count ? `${latestSyncRun.summary.files_count} files mapped` : "Codebase mapping pending",
+      body: latestSyncRun?.summary?.modules_count
+        ? `${latestSyncRun.summary.modules_count} modules are currently represented from the latest synced repository snapshot.`
+        : "Module and file structure appears here after the first completed import."
+    },
+    {
+      title: topContributor ? `${topContributor.username} is currently the top visible contributor` : "Contributor ownership will appear after sync",
+      body: topContributor
+        ? `${formatContributionLabel(topContributor.contributions_count)} are currently associated with ${topContributor.username} in synced contributor data.`
+        : "Top contributors and ownership hints will populate once contributor import completes."
+    }
+  ];
+}
+
+function getDashboardMetrics(repo, latestSyncRun, recentSyncRuns, topContributors) {
+  return [
+    {
+      label: "Sync status",
+      value: formatSyncStatusForBadge(latestSyncRun?.status || repo.sync_status),
+      meta: latestSyncRun ? `Latest ${latestSyncRun.sync_type} run` : "No sync run yet"
+    },
+    {
+      label: "Contributors",
+      value: formatCount(latestSyncRun?.summary?.contributors_count || topContributors.length),
+      meta: "Stored contributor records"
+    },
+    {
+      label: "Commits synced",
+      value: formatCount(latestSyncRun?.summary?.commits_count),
+      meta: "Latest completed import"
+    },
+    {
+      label: "Files mapped",
+      value: formatCount(latestSyncRun?.summary?.files_count),
+      meta: "Repository files currently indexed"
+    },
+    {
+      label: "Modules mapped",
+      value: formatCount(latestSyncRun?.summary?.modules_count),
+      meta: "Top-level modules derived from files"
+    },
+    {
+      label: "Recent sync runs",
+      value: formatCount(recentSyncRuns.length),
+      meta: "Most recent attempts retained on this page"
+    }
+  ];
+}
+
+function formatSyncStatusForBadge(status) {
+  switch ((status || "").toLowerCase()) {
+    case "queued":
+      return "Queued";
+    case "running":
+    case "importing":
+      return "Importing";
+    case "succeeded":
+    case "ready":
+      return "Ready";
+    case "failed":
+      return "Failed";
+    case "pending":
+      return "Pending";
+    default:
+      return "Not synced";
+  }
+}
+
+function formatCount(value) {
+  if (!value) {
+    return "0";
+  }
+  return new Intl.NumberFormat().format(value);
+}
+
+function formatDuration(durationMs) {
+  if (!durationMs || durationMs <= 0) {
+    return "Not available";
+  }
+
+  if (durationMs < 1000) {
+    return `${durationMs} ms`;
+  }
+
+  const seconds = Math.round(durationMs / 1000);
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+}
+
+function formatRelativeDate(value) {
+  if (!value) {
+    return "Not available";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Not available";
+  }
+
+  const diffMs = Date.now() - date.getTime();
+  const diffMinutes = Math.round(diffMs / 60000);
+
+  if (diffMinutes < 1) {
+    return "Just now";
+  }
+  if (diffMinutes < 60) {
+    return `${diffMinutes}m ago`;
+  }
+
+  const diffHours = Math.round(diffMinutes / 60);
+  if (diffHours < 24) {
+    return `${diffHours}h ago`;
+  }
+
+  const diffDays = Math.round(diffHours / 24);
+  if (diffDays < 7) {
+    return `${diffDays}d ago`;
+  }
+
+  return date.toLocaleString();
+}
+
+function formatContributionLabel(count) {
+  return `${formatCount(count)} contribution${count === 1 ? "" : "s"}`;
+}
+
+function getSyncTimingSummary(syncRun) {
+  if (syncRun.completed_at) {
+    return `completed ${formatRelativeDate(syncRun.completed_at)}`;
+  }
+  if (syncRun.started_at) {
+    return `started ${formatRelativeDate(syncRun.started_at)}`;
+  }
+  return `was queued ${formatRelativeDate(syncRun.created_at)}`;
+}
+
+function formatSyncRunDetail(syncRun) {
+  if (syncRun.status === "failed" && syncRun.error_message) {
+    return syncRun.error_message;
+  }
+
+  const summary = syncRun.summary || {};
+  const parts = [];
+
+  if (summary.commits_count > 0) {
+    parts.push(`${summary.commits_count} commits`);
+  }
+  if (summary.files_count > 0) {
+    parts.push(`${summary.files_count} files`);
+  }
+  if (summary.contributors_count > 0) {
+    parts.push(`${summary.contributors_count} contributors`);
+  }
+
+  if (parts.length > 0) {
+    return `${parts.join(", ")} imported`;
+  }
+
+  return getSyncTimingSummary(syncRun);
+}
+
+function getSyncRunPillLabel(syncRun) {
+  if (!syncRun?.status) {
+    return "not synced";
+  }
+
+  switch (syncRun.status) {
+    case "queued":
+      return "queued";
+    case "running":
+      return "running";
+    case "succeeded":
+      return "succeeded";
+    case "failed":
+      return "failed";
+    default:
+      return syncRun.status;
+  }
+}
+
+function getSyncRunMeta(repo, syncRun) {
+  if (!syncRun) {
+    return "No sync has been queued for this repository yet.";
+  }
+
+  if (syncRun.status === "queued") {
+    return "Waiting for the sync worker to pick this up.";
+  }
+
+  if (syncRun.status === "running") {
+    return "Importing contributors, commits, files, and modules.";
+  }
+
+  if (syncRun.status === "failed") {
+    return syncRun.error_message || "The last sync ended with an error.";
+  }
+
+  if (syncRun.status === "succeeded") {
+    const summary = syncRun.summary || {};
+    const parts = [];
+
+    if (summary.commits_count > 0) {
+      parts.push(`${summary.commits_count} commits`);
+    }
+    if (summary.files_count > 0) {
+      parts.push(`${summary.files_count} files`);
+    }
+    if (summary.contributors_count > 0) {
+      parts.push(`${summary.contributors_count} contributors`);
+    }
+
+    if (parts.length > 0) {
+      return `Last sync imported ${parts.join(", ")}.`;
+    }
+
+    return "Last sync completed successfully.";
+  }
+
+  switch ((repo.sync_status || "").toLowerCase()) {
+    case "ready":
+      return "Repository is connected and ready.";
+    case "importing":
+      return "Repository data is currently being imported.";
+    case "failed":
+      return "The previous sync failed. Queue another one to retry.";
+    default:
+      return "Repository is connected and waiting for its first sync.";
   }
 }
 
