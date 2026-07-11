@@ -8,13 +8,16 @@ import (
 	"time"
 
 	serviceconfig "codeatlas/apps/webhook-service/internal/config"
+	httpapi "codeatlas/apps/webhook-service/internal/http"
+	"codeatlas/packages/kafka"
 	"codeatlas/packages/logger"
 )
 
 type App struct {
-	config serviceconfig.Config
-	logger *slog.Logger
-	server *http.Server
+	config   serviceconfig.Config
+	logger   *slog.Logger
+	server   *http.Server
+	producer kafka.Producer
 }
 
 func New(cfg serviceconfig.Config) (*App, error) {
@@ -28,10 +31,14 @@ func New(cfg serviceconfig.Config) (*App, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+	producer := kafka.NewProducer(kafka.ProducerConfig{
+		Logger:   log,
+		Enabled:  cfg.KafkaEnabled,
+		Brokers:  cfg.KafkaBrokers,
+		ClientID: cfg.ServiceName,
 	})
+	handler := httpapi.NewHandler(cfg, log, producer)
+	handler.Register(mux)
 
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
@@ -40,9 +47,10 @@ func New(cfg serviceconfig.Config) (*App, error) {
 	}
 
 	return &App{
-		config: cfg,
-		logger: log,
-		server: server,
+		config:   cfg,
+		logger:   log,
+		server:   server,
+		producer: producer,
 	}, nil
 }
 
@@ -63,8 +71,10 @@ func (a *App) Run(ctx context.Context) error {
 		defer cancel()
 
 		a.logger.Info("shutting down")
+		defer a.producer.Close()
 		return a.server.Shutdown(shutdownCtx)
 	case err := <-errCh:
+		_ = a.producer.Close()
 		return err
 	}
 }

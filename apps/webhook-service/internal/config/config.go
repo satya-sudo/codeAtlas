@@ -1,18 +1,25 @@
 package config
 
 import (
+	"strings"
 	"time"
 
 	sharedconfig "codeatlas/packages/config"
+	"codeatlas/packages/events"
+	sharedkafka "codeatlas/packages/kafka"
 )
 
 type Config struct {
-	ServiceName     string
-	AppEnv          string
-	LogLevel        string
-	LogJSON         bool
-	HTTPPort        int
-	ShutdownTimeout time.Duration
+	ServiceName         string
+	AppEnv              string
+	LogLevel            string
+	LogJSON             bool
+	HTTPPort            int
+	ShutdownTimeout     time.Duration
+	GitHubWebhookSecret string
+	KafkaEnabled        bool
+	KafkaBrokers        []string
+	GitHubPushTopic     string
 }
 
 func Load() (Config, error) {
@@ -31,12 +38,30 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	kafkaEnabled, err := sharedconfig.GetBool("WEBHOOK_SERVICE_KAFKA_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+
+	var kafkaBrokers []string
+	kafkaBrokersRaw := strings.TrimSpace(sharedconfig.GetString("KAFKA_BROKERS", "localhost:9092"))
+	if kafkaBrokersRaw != "" {
+		kafkaBrokers, err = sharedkafka.ParseBrokers(kafkaBrokersRaw)
+		if err != nil {
+			return Config{}, err
+		}
+	}
+
 	return Config{
-		ServiceName:     "webhook-service",
-		AppEnv:          sharedconfig.GetString("APP_ENV", "development"),
-		LogLevel:        sharedconfig.GetString("LOG_LEVEL", "info"),
-		LogJSON:         logJSON,
-		HTTPPort:        httpPort,
-		ShutdownTimeout: shutdownTimeout,
+		ServiceName:         "webhook-service",
+		AppEnv:              sharedconfig.GetString("APP_ENV", "development"),
+		LogLevel:            sharedconfig.GetString("LOG_LEVEL", "info"),
+		LogJSON:             logJSON,
+		HTTPPort:            httpPort,
+		ShutdownTimeout:     shutdownTimeout,
+		GitHubWebhookSecret: sharedconfig.GetString("GITHUB_WEBHOOK_SECRET", ""),
+		KafkaEnabled:        kafkaEnabled,
+		KafkaBrokers:        kafkaBrokers,
+		GitHubPushTopic:     sharedconfig.GetString("WEBHOOK_SERVICE_GITHUB_PUSH_TOPIC", events.GitHubPushReceivedTopic),
 	}, nil
 }
