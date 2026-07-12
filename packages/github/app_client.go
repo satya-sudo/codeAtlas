@@ -10,7 +10,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -282,6 +284,10 @@ func (c *AppClient) ListRepositoryContributors(ctx context.Context, installation
 
 		var contributors []RepositoryContributor
 		if err := json.NewDecoder(resp.Body).Decode(&contributors); err != nil {
+			if errors.Is(err, io.EOF) {
+				resp.Body.Close()
+				break
+			}
 			resp.Body.Close()
 			return nil, fmt.Errorf("decode repository contributors response page %d: %w", page, err)
 		}
@@ -303,6 +309,7 @@ func (c *AppClient) ListRepositoryCommits(ctx context.Context, installationID in
 	}
 
 	const perPage = 100
+	const maxAttempts = 3
 
 	type commitSummary struct {
 		SHA string `json:"sha"`
@@ -310,39 +317,50 @@ func (c *AppClient) ListRepositoryCommits(ctx context.Context, installationID in
 
 	summaries := make([]commitSummary, 0, perPage)
 	for page := 1; ; page++ {
-		endpoint := fmt.Sprintf(
-			"%s/repos/%s/%s/commits?per_page=%d&page=%d",
-			c.apiBaseURL,
-			url.PathEscape(owner),
-			url.PathEscape(repo),
-			perPage,
-			page,
-		)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
-		if err != nil {
-			return nil, fmt.Errorf("build repository commits request: %w", err)
-		}
-
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("Authorization", "Bearer "+token.Token)
-		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("request repository commits page %d: %w", page, err)
-		}
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			defer resp.Body.Close()
-			return nil, decodeGitHubError(resp)
-		}
-
 		var pageSummaries []commitSummary
-		if err := json.NewDecoder(resp.Body).Decode(&pageSummaries); err != nil {
+		for attempt := 1; ; attempt++ {
+			endpoint := fmt.Sprintf(
+				"%s/repos/%s/%s/commits?per_page=%d&page=%d",
+				c.apiBaseURL,
+				url.PathEscape(owner),
+				url.PathEscape(repo),
+				perPage,
+				page,
+			)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
+			if err != nil {
+				return nil, fmt.Errorf("build repository commits request: %w", err)
+			}
+
+			req.Header.Set("Accept", "application/vnd.github+json")
+			req.Header.Set("Authorization", "Bearer "+token.Token)
+			req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				return nil, fmt.Errorf("request repository commits page %d: %w", page, err)
+			}
+
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				if attempt < maxAttempts && isRetryableGitHubStatus(resp.StatusCode) {
+					resp.Body.Close()
+					if err := sleepWithContext(ctx, time.Duration(attempt)*500*time.Millisecond); err != nil {
+						return nil, err
+					}
+					continue
+				}
+
+				defer resp.Body.Close()
+				return nil, decodeGitHubError(resp)
+			}
+
+			if err := json.NewDecoder(resp.Body).Decode(&pageSummaries); err != nil {
+				resp.Body.Close()
+				return nil, fmt.Errorf("decode repository commits response page %d: %w", page, err)
+			}
 			resp.Body.Close()
-			return nil, fmt.Errorf("decode repository commits response page %d: %w", page, err)
+			break
 		}
-		resp.Body.Close()
 
 		summaries = append(summaries, pageSummaries...)
 		if len(pageSummaries) < perPage {
@@ -378,31 +396,7 @@ func (c *AppClient) ListRepositoryCommits(ctx context.Context, installationID in
 }
 
 func (c *AppClient) getRepositoryCommit(ctx context.Context, installationToken string, owner string, repo string, sha string) (RepositoryCommit, error) {
-	endpoint := fmt.Sprintf(
-		"%s/repos/%s/%s/commits/%s",
-		c.apiBaseURL,
-		url.PathEscape(owner),
-		url.PathEscape(repo),
-		url.PathEscape(sha),
-	)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
-	if err != nil {
-		return RepositoryCommit{}, fmt.Errorf("build repository commit detail request: %w", err)
-	}
-
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Authorization", "Bearer "+installationToken)
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return RepositoryCommit{}, fmt.Errorf("request repository commit detail %s: %w", sha, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return RepositoryCommit{}, decodeGitHubError(resp)
-	}
+	const maxAttempts = 3
 
 	var payload struct {
 		SHA    string `json:"sha"`
@@ -436,8 +430,48 @@ func (c *AppClient) getRepositoryCommit(ctx context.Context, installationToken s
 			Patch            string `json:"patch"`
 		} `json:"files"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return RepositoryCommit{}, fmt.Errorf("decode repository commit detail %s: %w", sha, err)
+
+	for attempt := 1; ; attempt++ {
+		endpoint := fmt.Sprintf(
+			"%s/repos/%s/%s/commits/%s",
+			c.apiBaseURL,
+			url.PathEscape(owner),
+			url.PathEscape(repo),
+			url.PathEscape(sha),
+		)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
+		if err != nil {
+			return RepositoryCommit{}, fmt.Errorf("build repository commit detail request: %w", err)
+		}
+
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("Authorization", "Bearer "+installationToken)
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return RepositoryCommit{}, fmt.Errorf("request repository commit detail %s: %w", sha, err)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if attempt < maxAttempts && isRetryableGitHubStatus(resp.StatusCode) {
+				resp.Body.Close()
+				if err := sleepWithContext(ctx, time.Duration(attempt)*500*time.Millisecond); err != nil {
+					return RepositoryCommit{}, err
+				}
+				continue
+			}
+
+			defer resp.Body.Close()
+			return RepositoryCommit{}, decodeGitHubError(resp)
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			resp.Body.Close()
+			return RepositoryCommit{}, fmt.Errorf("decode repository commit detail %s: %w", sha, err)
+		}
+		resp.Body.Close()
+		break
 	}
 
 	commit := RepositoryCommit{
@@ -481,6 +515,22 @@ func (c *AppClient) getRepositoryCommit(ctx context.Context, installationToken s
 	}
 
 	return commit, nil
+}
+
+func isRetryableGitHubStatus(statusCode int) bool {
+	return statusCode >= 500 && statusCode <= 599
+}
+
+func sleepWithContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func normalizeGitHubFileStatus(status string) string {

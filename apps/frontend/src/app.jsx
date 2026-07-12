@@ -464,26 +464,22 @@ function App() {
 
     async function loadLatestSyncRuns() {
       try {
-        const results = await Promise.all(
-          deduplicatedConnectedRepositories.map(async (repo) => {
-            const response = await fetch(`${CONFIG.apiBaseUrl}/repos/${repo.id}/sync-runs`, {
-              headers: {
-                Authorization: `Bearer ${token}`
-              }
-            });
+        const response = await fetch(`${CONFIG.apiBaseUrl}/repos/sync-status`, {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
 
-            if (response.status === 401) {
-              throw new Error("unauthorized");
-            }
+        if (response.status === 401) {
+          throw new Error("unauthorized");
+        }
 
-            if (!response.ok) {
-              throw new Error(`sync runs request failed for repository ${repo.id}`);
-            }
+        if (!response.ok) {
+          throw new Error(`sync status request failed with status ${response.status}`);
+        }
 
-            const payload = await response.json();
-            return [repo.id, payload.sync_runs?.[0] || null];
-          })
-        );
+        const payload = await response.json();
+        const results = (payload.repositories || []).map((item) => [item.repository.id, item.latest_sync_run || null]);
 
         if (!cancelled) {
           setLatestSyncRunsByRepo(Object.fromEntries(results));
@@ -502,7 +498,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [token, user, deduplicatedConnectedRepositories, connectedReposVersion]);
+  }, [token, user, deduplicatedConnectedRepositories.length, connectedReposVersion]);
 
   useEffect(() => {
     if (!token || !user || deduplicatedConnectedRepositories.length === 0) {
@@ -517,8 +513,8 @@ function App() {
   }, [token, user, deduplicatedConnectedRepositories.length]);
 
   useEffect(() => {
-    if (!token || !user || route.view !== "dashboard" || !route.repositoryId) {
-      if (route.view !== "dashboard") {
+    if (!token || !user || (route.view !== "dashboard" && route.view !== "modules" && route.view !== "hotspots" && route.view !== "cochange") || !route.repositoryId) {
+      if (route.view !== "dashboard" && route.view !== "modules" && route.view !== "hotspots" && route.view !== "cochange") {
         setDashboardData(null);
         setDashboardStatus("idle");
         setDashboardError("");
@@ -533,13 +529,120 @@ function App() {
       setDashboardError("");
 
       try {
-        const response = await fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/dashboard`, {
-          headers: {
-            Authorization: `Bearer ${token}`
-          }
-        });
+        const headers = {
+          Authorization: `Bearer ${token}`
+        };
 
-        if (response.status === 401) {
+        if (route.view === "hotspots") {
+          const [dashboardResponse, hotspotsResponse] = await Promise.all([
+            fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/dashboard`, { headers }),
+            fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/hotspots?limit=100`, { headers })
+          ]);
+
+          if (dashboardResponse.status === 401 || hotspotsResponse.status === 401) {
+            localStorage.removeItem(CONFIG.tokenStorageKey);
+            if (!cancelled) {
+              resetSession("Session expired. Sign in again.");
+            }
+            return;
+          }
+
+          if (dashboardResponse.status === 404) {
+            if (!cancelled) {
+              setDashboardData(null);
+              setDashboardStatus("failed");
+              setDashboardError("This repository is not available in your workspace yet.");
+            }
+            return;
+          }
+
+          if (!dashboardResponse.ok) {
+            throw new Error(`dashboard request failed with status ${dashboardResponse.status}`);
+          }
+
+          if (!hotspotsResponse.ok) {
+            throw new Error(`hotspots request failed with status ${hotspotsResponse.status}`);
+          }
+
+          const dashboardPayload = await dashboardResponse.json();
+          const hotspotsPayload = await hotspotsResponse.json();
+
+          if (!cancelled) {
+            setDashboardData({
+              ...dashboardPayload.dashboard,
+              hotspots: hotspotsPayload.hotspots || []
+            });
+            setDashboardStatus("ready");
+            setDashboardError("");
+          }
+          return;
+        }
+
+        if (route.view === "cochange") {
+          const [dashboardResponse, coChangeResponse, moduleCoChangeResponse] = await Promise.all([
+            fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/dashboard`, { headers }),
+            fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/co-change?limit=100`, { headers }),
+            fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/modules/co-change?limit=50`, { headers })
+          ]);
+
+          if (dashboardResponse.status === 401 || coChangeResponse.status === 401 || moduleCoChangeResponse.status === 401) {
+            localStorage.removeItem(CONFIG.tokenStorageKey);
+            if (!cancelled) {
+              resetSession("Session expired. Sign in again.");
+            }
+            return;
+          }
+
+          if (dashboardResponse.status === 404) {
+            if (!cancelled) {
+              setDashboardData(null);
+              setDashboardStatus("failed");
+              setDashboardError("This repository is not available in your workspace yet.");
+            }
+            return;
+          }
+
+          if (!dashboardResponse.ok) {
+            throw new Error(`dashboard request failed with status ${dashboardResponse.status}`);
+          }
+
+          if (!coChangeResponse.ok) {
+            throw new Error(`co-change request failed with status ${coChangeResponse.status}`);
+          }
+
+          if (!moduleCoChangeResponse.ok) {
+            throw new Error(`module co-change request failed with status ${moduleCoChangeResponse.status}`);
+          }
+
+          const dashboardPayload = await dashboardResponse.json();
+          const coChangePayload = await coChangeResponse.json();
+          const moduleCoChangePayload = await moduleCoChangeResponse.json();
+
+          if (!cancelled) {
+            setDashboardData({
+              ...dashboardPayload.dashboard,
+              co_changes: coChangePayload.co_changes || [],
+              module_co_changes: moduleCoChangePayload.module_co_changes || []
+            });
+            setDashboardStatus("ready");
+            setDashboardError("");
+          }
+          return;
+        }
+
+        const [dashboardResponse, ownershipResponse, expertiseResponse, busFactorResponse] = await Promise.all([
+          fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/dashboard`, { headers }),
+          fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/modules/ownership`, { headers }),
+          fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/modules/expertise`, { headers }),
+          fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/modules/bus-factor`, { headers })
+        ]);
+
+        if (
+          dashboardResponse.status === 401 ||
+          ownershipResponse.status === 401 ||
+          expertiseResponse.status === 401 ||
+          busFactorResponse.status === 401
+        ) {
           localStorage.removeItem(CONFIG.tokenStorageKey);
           if (!cancelled) {
             resetSession("Session expired. Sign in again.");
@@ -547,7 +650,7 @@ function App() {
           return;
         }
 
-        if (response.status === 404) {
+        if (dashboardResponse.status === 404) {
           if (!cancelled) {
             setDashboardData(null);
             setDashboardStatus("failed");
@@ -556,13 +659,34 @@ function App() {
           return;
         }
 
-        if (!response.ok) {
-          throw new Error(`dashboard request failed with status ${response.status}`);
+        if (!dashboardResponse.ok) {
+          throw new Error(`dashboard request failed with status ${dashboardResponse.status}`);
         }
 
-        const payload = await response.json();
+        const dashboardPayload = await dashboardResponse.json();
+        const moduleOwnershipPayload = ownershipResponse.ok ? await ownershipResponse.json() : { modules: [] };
+        const moduleExpertisePayload = expertiseResponse.ok ? await expertiseResponse.json() : { modules: [] };
+        const moduleBusFactorPayload = busFactorResponse.ok ? await busFactorResponse.json() : { modules: [] };
+        const coChangeResponse = await fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/co-change?limit=6`, { headers });
+
+        if (coChangeResponse.status === 401) {
+          localStorage.removeItem(CONFIG.tokenStorageKey);
+          if (!cancelled) {
+            resetSession("Session expired. Sign in again.");
+          }
+          return;
+        }
+
+        const coChangePayload = coChangeResponse.ok ? await coChangeResponse.json() : { co_changes: [] };
+
         if (!cancelled) {
-          setDashboardData(payload.dashboard);
+          setDashboardData({
+            ...dashboardPayload.dashboard,
+            module_ownership: moduleOwnershipPayload.modules || [],
+            module_expertise: moduleExpertisePayload.modules || [],
+            module_bus_factor: moduleBusFactorPayload.modules || [],
+            co_changes: coChangePayload.co_changes || []
+          });
           setDashboardStatus("ready");
           setDashboardError("");
         }
@@ -780,6 +904,18 @@ function App() {
     navigateToRoute(`/repos/${repoId}/dashboard`);
   };
 
+  const openRepositoryModules = (repoId) => {
+    navigateToRoute(`/repos/${repoId}/modules`);
+  };
+
+  const openRepositoryHotspots = (repoId) => {
+    navigateToRoute(`/repos/${repoId}/hotspots`);
+  };
+
+  const openRepositoryCoChange = (repoId) => {
+    navigateToRoute(`/repos/${repoId}/co-change`);
+  };
+
   const returnToRepositories = () => {
     navigateToRoute("/");
   };
@@ -839,7 +975,7 @@ function App() {
           </div>
 
           <div className="topbar-nav">
-            {route.view === "dashboard" ? (
+            {route.view === "dashboard" || route.view === "modules" || route.view === "hotspots" || route.view === "cochange" ? (
               <button type="button" className="link-button topbar-back" onClick={returnToRepositories}>
                 ← Repositories
               </button>
@@ -866,6 +1002,31 @@ function App() {
               status={dashboardStatus}
               error={dashboardError}
               onBack={returnToRepositories}
+              onOpenModules={openRepositoryModules}
+              onOpenHotspots={openRepositoryHotspots}
+              onOpenCoChange={openRepositoryCoChange}
+            />
+          ) : route.view === "modules" ? (
+            <RepositoryModulesPage
+              dashboard={dashboardData}
+              status={dashboardStatus}
+              error={dashboardError}
+              onBack={() => openRepositoryDashboard(route.repositoryId)}
+            />
+          ) : route.view === "hotspots" ? (
+            <RepositoryHotspotsPage
+              dashboard={dashboardData}
+              status={dashboardStatus}
+              error={dashboardError}
+              onBack={() => openRepositoryDashboard(route.repositoryId)}
+            />
+          ) : route.view === "cochange" ? (
+            <RepositoryCoChangePage
+              dashboard={dashboardData}
+              status={dashboardStatus}
+              error={dashboardError}
+              token={token}
+              onBack={() => openRepositoryDashboard(route.repositoryId)}
             />
           ) : (
             <>
@@ -1047,6 +1208,14 @@ function App() {
                   <div className="connected-repo-list">
                     {deduplicatedConnectedRepositories.map((repo) => (
                       <div className="connected-repo-card" key={repo.id}>
+                        {latestSyncRunsByRepo[repo.id]?.status === "failed" ? (
+                          <div className="sync-run-alert sync-run-alert-failed">
+                            <strong>Latest sync failed</strong>
+                            <p>{latestSyncRunsByRepo[repo.id]?.error_message || "The last sync ended with an error."}</p>
+                            <span>{`Last attempt ${formatRelativeDate(latestSyncRunsByRepo[repo.id]?.completed_at || latestSyncRunsByRepo[repo.id]?.started_at || latestSyncRunsByRepo[repo.id]?.created_at)}`}</span>
+                          </div>
+                        ) : null}
+
                         <div className="connected-repo-head">
                           <div>
                             <button type="button" className="repo-link-button" onClick={() => openRepositoryDashboard(repo.id)}>
@@ -1107,7 +1276,7 @@ function App() {
   );
 }
 
-function RepositoryDashboardPage({ dashboard, status, error, onBack }) {
+function RepositoryDashboardPage({ dashboard, status, error, onBack, onOpenModules, onOpenHotspots, onOpenCoChange }) {
   if (status === "loading") {
     return (
       <section className="dashboard-shell">
@@ -1138,11 +1307,18 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack }) {
   }
 
   const repo = dashboard.repository;
+  const overview = dashboard.overview || {};
+  const hotspots = dashboard.hotspots || [];
+  const coChanges = dashboard.co_changes || [];
+  const moduleOwnership = dashboard.module_ownership || [];
+  const moduleExpertise = dashboard.module_expertise || [];
+  const moduleBusFactor = dashboard.module_bus_factor || [];
   const latestSyncRun = dashboard.latest_sync_run;
   const recentSyncRuns = dashboard.recent_sync_runs || [];
   const topContributors = dashboard.top_contributors || [];
-  const highlights = getDashboardHighlights(repo, latestSyncRun, topContributors);
-  const metrics = getDashboardMetrics(repo, latestSyncRun, recentSyncRuns, topContributors);
+  const highlights = getDashboardHighlights(repo, overview, latestSyncRun, topContributors, moduleBusFactor);
+  const metrics = getDashboardMetrics(repo, overview, latestSyncRun, recentSyncRuns, topContributors);
+  const moduleSummary = getModuleSummary(moduleOwnership, moduleExpertise, moduleBusFactor);
 
   return (
     <section className="dashboard-shell">
@@ -1178,7 +1354,7 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack }) {
           </div>
           <div className="hero-meta-card">
             <span>Last updated</span>
-            <strong>{formatRelativeDate(repo.last_synced_at || repo.updated_at)}</strong>
+            <strong>{formatRelativeDate(overview.last_synced_at || repo.last_synced_at || repo.updated_at)}</strong>
           </div>
           <div className="hero-meta-card">
             <span>Latest sync</span>
@@ -1206,6 +1382,30 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack }) {
         </div>
       </section>
 
+      {latestSyncRun ? (
+        <section className={`dashboard-sync-health dashboard-sync-health-${latestSyncRun.status}`}>
+          <div>
+            <span className="eyebrow">Sync health</span>
+            <h2>{getSyncHealthTitle(latestSyncRun)}</h2>
+            <p>{getSyncHealthBody(latestSyncRun)}</p>
+          </div>
+          <div className="dashboard-sync-health-meta">
+            <div className="hero-meta-card">
+              <span>Latest state</span>
+              <strong>{formatSyncStatusForBadge(latestSyncRun.status)}</strong>
+            </div>
+            <div className="hero-meta-card">
+              <span>Last attempt</span>
+              <strong>{formatRelativeDate(latestSyncRun.completed_at || latestSyncRun.started_at || latestSyncRun.created_at)}</strong>
+            </div>
+            <div className="hero-meta-card">
+              <span>Duration</span>
+              <strong>{formatDuration(latestSyncRun.summary?.duration_ms)}</strong>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
       <section className="dashboard-kpi-grid">
         {metrics.map((metric) => (
           <div className="dashboard-kpi-card" key={metric.label}>
@@ -1227,22 +1427,90 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack }) {
             </div>
             <div className="dashboard-overview-grid">
               <div className="overview-item">
-                <span>Repository</span>
-                <strong>{repo.full_name}</strong>
+                <span>Total commits</span>
+                <strong>{formatCount(overview.total_commits)}</strong>
               </div>
               <div className="overview-item">
-                <span>Sync state</span>
-                <strong>{formatSyncStatusForBadge(repo.sync_status)}</strong>
+                <span>Total contributors</span>
+                <strong>{formatCount(overview.total_contributors)}</strong>
               </div>
               <div className="overview-item">
-                <span>Environment</span>
-                <strong>Not connected yet</strong>
+                <span>Total files</span>
+                <strong>{formatCount(overview.total_files)}</strong>
               </div>
               <div className="overview-item">
-                <span>Version</span>
-                <strong>Coming soon</strong>
+                <span>Total modules</span>
+                <strong>{formatCount(overview.total_modules)}</strong>
+              </div>
+              <div className="overview-item">
+                <span>Last sync duration</span>
+                <strong>{formatDuration(overview.latest_sync_duration_ms)}</strong>
+              </div>
+              <div className="overview-item">
+                <span>Last synced</span>
+                <strong>{formatRelativeDate(overview.last_synced_at)}</strong>
               </div>
             </div>
+          </section>
+
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <h3>Hotspot files</h3>
+                <p>A compact summary of where file churn is currently concentrated.</p>
+              </div>
+              <button type="button" className="button button-secondary button-small" onClick={() => onOpenHotspots(repo.id)}>
+                View all hotspots
+              </button>
+            </div>
+
+            {hotspots.length === 0 ? (
+              <div className="dashboard-empty-panel">
+                <strong>No hotspot data yet</strong>
+                <p>Hotspot analysis will appear here after commit history has been imported.</p>
+              </div>
+            ) : (
+              <div className="dashboard-module-summary-grid">
+                {getHotspotSummary(hotspots).map((item) => (
+                  <div className="dashboard-module-summary-card" key={item.title}>
+                    <span className="dashboard-module-summary-label">{item.title}</span>
+                    <strong>{item.primary}</strong>
+                    <p>{item.secondary}</p>
+                    {item.meta ? <span className="dashboard-inline-chip">{item.meta}</span> : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <h3>Files that move together</h3>
+                <p>Early co-change signals from commit history, useful for spotting coupling and hidden dependencies.</p>
+              </div>
+              <button type="button" className="button button-secondary button-small" onClick={() => onOpenCoChange(repo.id)}>
+                View all pairs
+              </button>
+            </div>
+
+            {coChanges.length === 0 ? (
+              <div className="dashboard-empty-panel">
+                <strong>No co-change data yet</strong>
+                <p>Once synced commit history is available, CodeAtlas will surface files that frequently change together.</p>
+              </div>
+            ) : (
+              <div className="dashboard-module-summary-grid">
+                {getCoChangeSummary(coChanges).map((item) => (
+                  <div className="dashboard-module-summary-card" key={item.title}>
+                    <span className="dashboard-module-summary-label">{item.title}</span>
+                    <strong>{item.primary}</strong>
+                    <p>{item.secondary}</p>
+                    {item.meta ? <span className="dashboard-inline-chip">{item.meta}</span> : null}
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
 
           <section className="dashboard-panel">
@@ -1270,6 +1538,86 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack }) {
                       <span>{formatRelativeDate(run.completed_at || run.started_at || run.created_at)}</span>
                       <code>{run.sync_type}</code>
                     </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <h3>Module intelligence</h3>
+                <p>A compact summary of ownership, expertise, and risk across the synced module map.</p>
+              </div>
+              <button type="button" className="button button-secondary button-small" onClick={() => onOpenModules(repo.id)}>
+                View all modules
+              </button>
+            </div>
+
+            {moduleSummary.length === 0 ? (
+              <div className="dashboard-empty-panel">
+                <strong>No module analytics yet</strong>
+                <p>Run a completed sync to compute ownership, expertise, and bus-factor summaries for modules.</p>
+              </div>
+            ) : (
+              <div className="dashboard-module-summary-grid">
+                {moduleSummary.map((item) => (
+                  <div className="dashboard-module-summary-card" key={item.title}>
+                    <span className="dashboard-module-summary-label">{item.title}</span>
+                    <strong>{item.primary}</strong>
+                    <p>{item.secondary}</p>
+                    {item.meta ? <span className={`dashboard-inline-chip ${item.metaClass || ""}`}>{item.meta}</span> : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <h3>Top module owners</h3>
+                <p>The strongest ownership signals across the highest-priority modules.</p>
+              </div>
+            </div>
+
+            {moduleOwnership.length === 0 ? (
+              <div className="dashboard-empty-panel">
+                <strong>No module ownership data yet</strong>
+                <p>Ownership distribution appears here after module analytics have been rebuilt.</p>
+              </div>
+            ) : (
+              <div className="dashboard-module-list">
+                {moduleOwnership.slice(0, 3).map((module) => (
+                  <div className="dashboard-module-card" key={module.module_id}>
+                    <div className="dashboard-module-head">
+                      <div>
+                        <strong>{module.module_name}</strong>
+                        <p>{formatModulePath(module.path_prefix)}</p>
+                      </div>
+                      <div className="dashboard-module-badges">
+                        <span className={`dashboard-badge ${getRiskBadgeClass(module.risk)}`}>{formatRiskLabel(module.risk)}</span>
+                        <span className="dashboard-badge">{`Bus factor ${module.bus_factor || 0}`}</span>
+                      </div>
+                    </div>
+                    {module.owners.length === 0 ? (
+                      <p className="dashboard-module-empty-copy">No ownership entries computed yet for this module.</p>
+                    ) : (
+                      <div className="dashboard-module-owner-list">
+                        {module.owners.slice(0, 3).map((owner) => (
+                          <div className="dashboard-module-owner-row" key={`${module.module_id}-${owner.rank}-${owner.username}`}>
+                            <div>
+                              <strong>{owner.username}</strong>
+                              <p>
+                                {formatCount(owner.commit_count)} commits, {formatCount(owner.files_touched_count)} files touched
+                              </p>
+                            </div>
+                            <span className="dashboard-module-owner-percent">{formatPercent(owner.ownership_percent)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1321,15 +1669,20 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack }) {
             <div className="dashboard-aside-list">
               <div className="aside-item">
                 <span>Last sync duration</span>
-                <strong>{formatDuration(latestSyncRun?.summary?.duration_ms)}</strong>
+                <strong>{formatDuration(overview.latest_sync_duration_ms || latestSyncRun?.summary?.duration_ms)}</strong>
               </div>
               <div className="aside-item">
                 <span>Files mapped</span>
-                <strong>{formatCount(latestSyncRun?.summary?.files_count)}</strong>
+                <strong>{formatCount(overview.total_files || latestSyncRun?.summary?.files_count)}</strong>
               </div>
               <div className="aside-item">
                 <span>Modules mapped</span>
-                <strong>{formatCount(latestSyncRun?.summary?.modules_count)}</strong>
+                <strong>{formatCount(overview.total_modules || latestSyncRun?.summary?.modules_count)}</strong>
+              </div>
+              <div className="aside-item">
+                <span>Highest risk module</span>
+                <strong>{moduleSummary[0]?.title === "Bus factor risk" ? moduleSummary[0].primary : "Not available"}</strong>
+                <p>{moduleSummary[0]?.secondary || "Risk concentration appears here after module analytics are available."}</p>
               </div>
             </div>
           </section>
@@ -1366,6 +1719,686 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack }) {
           </section>
         </aside>
       </section>
+    </section>
+  );
+}
+
+function RepositoryModulesPage({ dashboard, status, error, onBack }) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortBy, setSortBy] = useState("risk");
+  const repo = dashboard?.repository;
+  const moduleOwnership = dashboard?.module_ownership || [];
+  const moduleExpertise = dashboard?.module_expertise || [];
+  const moduleBusFactor = dashboard?.module_bus_factor || [];
+  const modules = useMemo(() => {
+    const mergedModules = mergeModuleAnalytics(moduleOwnership, moduleExpertise, moduleBusFactor);
+    const query = searchQuery.trim().toLowerCase();
+
+    const filteredModules = !query
+      ? mergedModules
+      : mergedModules.filter((module) => {
+          const ownerNames = (module.owners || []).map((owner) => owner.username).join(" ").toLowerCase();
+          const expertNames = (module.experts || []).map((expert) => expert.username).join(" ").toLowerCase();
+          return (
+            module.module_name.toLowerCase().includes(query) ||
+            (module.path_prefix || "").toLowerCase().includes(query) ||
+            ownerNames.includes(query) ||
+            expertNames.includes(query)
+          );
+        });
+
+    return [...filteredModules].sort((left, right) => {
+      if (sortBy === "owners") {
+        if ((right.top_owner_percent || 0) !== (left.top_owner_percent || 0)) {
+          return (right.top_owner_percent || 0) - (left.top_owner_percent || 0);
+        }
+      } else if (sortBy === "bus_factor") {
+        if ((left.bus_factor || 0) !== (right.bus_factor || 0)) {
+          return (left.bus_factor || 0) - (right.bus_factor || 0);
+        }
+      } else if (sortBy === "contributors") {
+        if ((right.active_contributors || 0) !== (left.active_contributors || 0)) {
+          return (right.active_contributors || 0) - (left.active_contributors || 0);
+        }
+      } else {
+        const leftRisk = riskOrder(left.risk);
+        const rightRisk = riskOrder(right.risk);
+        if (leftRisk !== rightRisk) {
+          return leftRisk - rightRisk;
+        }
+      }
+
+      return left.module_name.localeCompare(right.module_name);
+    });
+  }, [moduleOwnership, moduleExpertise, moduleBusFactor, searchQuery, sortBy]);
+
+  if (status === "loading") {
+    return (
+      <section className="dashboard-shell">
+        <div className="dashboard-empty-state">
+          <strong>Loading module analytics…</strong>
+          <p>Fetching ownership, expertise, and bus-factor details.</p>
+        </div>
+      </section>
+    );
+  }
+
+  if (status === "failed") {
+    return (
+      <section className="dashboard-shell">
+        <div className="dashboard-empty-state">
+          <strong>Module analytics unavailable</strong>
+          <p>{error || "We could not load module analytics right now."}</p>
+          <button type="button" className="button button-secondary button-small" onClick={onBack}>
+            Back to dashboard
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (!dashboard) {
+    return null;
+  }
+
+  return (
+    <section className="dashboard-shell">
+      <section className="dashboard-subpage-hero">
+        <div>
+          <div className="dashboard-breadcrumb">
+            <button type="button" className="link-button" onClick={onBack}>
+              {repo.name}
+            </button>
+            <span>/</span>
+            <span>Modules</span>
+          </div>
+          <h1>Module intelligence</h1>
+          <p>
+            A deeper view of ownership concentration, reviewer expertise, and bus-factor risk for <strong>{repo.full_name}</strong>.
+          </p>
+        </div>
+      </section>
+
+      <section className="dashboard-toolbar">
+        <label className="dashboard-search-field">
+          <span>Search modules</span>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search by module, path, owner, or expert"
+          />
+        </label>
+
+        <label className="dashboard-select-field">
+          <span>Sort by</span>
+          <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
+            <option value="risk">Highest risk</option>
+            <option value="owners">Ownership concentration</option>
+            <option value="bus_factor">Lowest bus factor</option>
+            <option value="contributors">Most contributors</option>
+          </select>
+        </label>
+      </section>
+
+      {modules.length === 0 ? (
+        <section className="dashboard-panel">
+          <div className="dashboard-empty-panel">
+            <strong>{searchQuery ? "No modules match this search" : "No module analytics yet"}</strong>
+            <p>{searchQuery ? "Try a different module name, path, owner, or expert." : "Queue and complete a repository sync to populate ownership, expertise, and bus-factor details."}</p>
+          </div>
+        </section>
+      ) : (
+        <section className="dashboard-module-detail-list">
+          {modules.map((module) => (
+            <section className="dashboard-panel" key={module.module_id}>
+              <div className="dashboard-panel-head">
+                <div>
+                  <h3>{module.module_name}</h3>
+                  <p>{formatModulePath(module.path_prefix)}</p>
+                </div>
+                <div className="dashboard-module-badges">
+                  <span className={`dashboard-badge ${getRiskBadgeClass(module.risk)}`}>{formatRiskLabel(module.risk)}</span>
+                  <span className="dashboard-badge">{`Bus factor ${module.bus_factor || 0}`}</span>
+                  <span className="dashboard-badge">{`${formatCount(module.active_contributors || 0)} contributors`}</span>
+                </div>
+              </div>
+
+              <div className="dashboard-module-detail-grid">
+                <div className="dashboard-module-detail-column">
+                  <h4>Ownership</h4>
+                  {module.owners.length === 0 ? (
+                    <p className="dashboard-module-empty-copy">No ownership entries computed yet.</p>
+                  ) : (
+                    <div className="dashboard-module-owner-list">
+                      {module.owners.map((owner) => (
+                        <div className="dashboard-module-owner-row" key={`${module.module_id}-owner-${owner.rank}-${owner.username}`}>
+                          <div>
+                            <strong>{owner.username}</strong>
+                            <p>
+                              {formatCount(owner.commit_count)} commits, {formatCount(owner.files_touched_count)} files touched, {formatCount(owner.changes_count)} changes
+                            </p>
+                          </div>
+                          <span className="dashboard-module-owner-percent">{formatPercent(owner.ownership_percent)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="dashboard-module-detail-column">
+                  <h4>Expertise</h4>
+                  {module.experts.length === 0 ? (
+                    <p className="dashboard-module-empty-copy">No expertise entries computed yet.</p>
+                  ) : (
+                    <div className="dashboard-module-owner-list">
+                      {module.experts.map((expert) => (
+                        <div className="dashboard-module-owner-row" key={`${module.module_id}-expert-${expert.rank}-${expert.username}`}>
+                          <div>
+                            <strong>{expert.username}</strong>
+                            <p>
+                              Score {expert.score}, {formatCount(expert.commit_count)} commits, {formatCount(expert.recent_commit_count)} recent commits
+                            </p>
+                          </div>
+                          <span className="dashboard-module-owner-percent">{expert.score}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+          ))}
+        </section>
+      )}
+    </section>
+  );
+}
+
+function RepositoryHotspotsPage({ dashboard, status, error, onBack }) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortBy, setSortBy] = useState("churn");
+  const repo = dashboard?.repository;
+  const hotspots = useMemo(() => {
+    const items = dashboard?.hotspots || [];
+    const query = searchQuery.trim().toLowerCase();
+    const filteredItems = !query ? items : items.filter((hotspot) => hotspot.path.toLowerCase().includes(query));
+
+    return [...filteredItems].sort((left, right) => {
+      if (sortBy === "commits") {
+        if (right.commit_count !== left.commit_count) {
+          return right.commit_count - left.commit_count;
+        }
+      } else if (sortBy === "additions") {
+        if (right.lines_added !== left.lines_added) {
+          return right.lines_added - left.lines_added;
+        }
+      } else {
+        if (right.churn !== left.churn) {
+          return right.churn - left.churn;
+        }
+      }
+
+      return left.path.localeCompare(right.path);
+    });
+  }, [dashboard, searchQuery, sortBy]);
+
+  if (status === "loading") {
+    return (
+      <section className="dashboard-shell">
+        <div className="dashboard-empty-state">
+          <strong>Loading hotspot files…</strong>
+          <p>Fetching ranked file churn details from synced commit history.</p>
+        </div>
+      </section>
+    );
+  }
+
+  if (status === "failed") {
+    return (
+      <section className="dashboard-shell">
+        <div className="dashboard-empty-state">
+          <strong>Hotspot detail unavailable</strong>
+          <p>{error || "We could not load hotspot details right now."}</p>
+          <button type="button" className="button button-secondary button-small" onClick={onBack}>
+            Back to dashboard
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (!dashboard) {
+    return null;
+  }
+
+  return (
+    <section className="dashboard-shell">
+      <section className="dashboard-subpage-hero">
+        <div>
+          <div className="dashboard-breadcrumb">
+            <button type="button" className="link-button" onClick={onBack}>
+              {repo.name}
+            </button>
+            <span>/</span>
+            <span>Hotspots</span>
+          </div>
+          <h1>Hotspot files</h1>
+          <p>
+            Ranked file churn detail for <strong>{repo.full_name}</strong>, based on synced commit history only.
+          </p>
+        </div>
+      </section>
+
+      <section className="dashboard-toolbar">
+        <label className="dashboard-search-field">
+          <span>Search files</span>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search by file path"
+          />
+        </label>
+
+        <label className="dashboard-select-field">
+          <span>Sort by</span>
+          <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
+            <option value="churn">Highest churn</option>
+            <option value="commits">Most commits</option>
+            <option value="additions">Most additions</option>
+          </select>
+        </label>
+      </section>
+
+      {hotspots.length === 0 ? (
+        <section className="dashboard-panel">
+          <div className="dashboard-empty-panel">
+            <strong>{searchQuery ? "No files match this search" : "No hotspot data yet"}</strong>
+            <p>{searchQuery ? "Try a different file path." : "Complete a repository sync to populate file-level churn and hotspot rankings."}</p>
+          </div>
+        </section>
+      ) : (
+        <section className="dashboard-module-detail-list">
+          {hotspots.map((hotspot, index) => (
+            <section className="dashboard-panel" key={hotspot.path}>
+              <div className="dashboard-panel-head">
+                <div>
+                  <h3 title={hotspot.path}>{hotspot.path}</h3>
+                  <p>{`Rank #${index + 1} by total churn`}</p>
+                </div>
+                <div className="dashboard-module-badges">
+                  <span className="dashboard-badge">{`${formatCount(hotspot.commit_count)} commits`}</span>
+                  <span className="dashboard-badge dashboard-badge-primary">{`${formatCount(hotspot.churn)} churn`}</span>
+                </div>
+              </div>
+
+              <div className="dashboard-overview-grid">
+                <div className="overview-item">
+                  <span>Lines added</span>
+                  <strong>{formatCount(hotspot.lines_added)}</strong>
+                </div>
+                <div className="overview-item">
+                  <span>Lines deleted</span>
+                  <strong>{formatCount(hotspot.lines_deleted)}</strong>
+                </div>
+                <div className="overview-item">
+                  <span>Commit touches</span>
+                  <strong>{formatCount(hotspot.commit_count)}</strong>
+                </div>
+                <div className="overview-item">
+                  <span>Total churn</span>
+                  <strong>{formatCount(hotspot.churn)}</strong>
+                </div>
+              </div>
+            </section>
+          ))}
+        </section>
+      )}
+    </section>
+  );
+}
+
+function RepositoryCoChangePage({ dashboard, status, error, token, onBack }) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortBy, setSortBy] = useState("frequency");
+  const [focusedPath, setFocusedPath] = useState("");
+  const [focusedPairs, setFocusedPairs] = useState([]);
+  const [focusedStatus, setFocusedStatus] = useState("idle");
+  const [focusedError, setFocusedError] = useState("");
+  const [moduleSearchQuery, setModuleSearchQuery] = useState("");
+  const [moduleSortBy, setModuleSortBy] = useState("frequency");
+  const repo = dashboard?.repository;
+
+  useEffect(() => {
+    if (!focusedPath || !repo?.id || !token) {
+      setFocusedPairs([]);
+      setFocusedStatus("idle");
+      setFocusedError("");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadFocusedPairs() {
+      setFocusedStatus("loading");
+      setFocusedError("");
+
+      try {
+        const response = await fetch(
+          `${CONFIG.apiBaseUrl}/repos/${repo.id}/co-change?limit=100&path=${encodeURIComponent(focusedPath)}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`
+            }
+          }
+        );
+
+        if (!response.ok) {
+          throw new Error(`focused co-change request failed with status ${response.status}`);
+        }
+
+        const payload = await response.json();
+        if (!cancelled) {
+          setFocusedPairs(payload.co_changes || []);
+          setFocusedStatus("ready");
+        }
+      } catch (fetchError) {
+        console.error(fetchError);
+        if (!cancelled) {
+          setFocusedPairs([]);
+          setFocusedStatus("failed");
+          setFocusedError("Could not load focused file pairs.");
+        }
+      }
+    }
+
+    loadFocusedPairs();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [focusedPath, repo?.id, token]);
+
+  const pairs = useMemo(() => {
+    const items = focusedPath ? focusedPairs : dashboard?.co_changes || [];
+    const query = searchQuery.trim().toLowerCase();
+    const filteredItems = !query
+      ? items
+      : items.filter((pair) => pair.left_path.toLowerCase().includes(query) || pair.right_path.toLowerCase().includes(query));
+
+    return [...filteredItems].sort((left, right) => {
+      if (sortBy === "recent") {
+        const leftTime = left.last_cochanged_at ? new Date(left.last_cochanged_at).getTime() : 0;
+        const rightTime = right.last_cochanged_at ? new Date(right.last_cochanged_at).getTime() : 0;
+        if (rightTime !== leftTime) {
+          return rightTime - leftTime;
+        }
+      } else {
+        if (right.cochange_count !== left.cochange_count) {
+          return right.cochange_count - left.cochange_count;
+        }
+      }
+
+      return `${left.left_path} ${left.right_path}`.localeCompare(`${right.left_path} ${right.right_path}`);
+    });
+  }, [dashboard, focusedPairs, focusedPath, searchQuery, sortBy]);
+
+  const modulePairs = useMemo(() => {
+    const items = dashboard?.module_co_changes || [];
+    const query = moduleSearchQuery.trim().toLowerCase();
+    const filteredItems = !query
+      ? items
+      : items.filter(
+          (pair) =>
+            pair.left_module_name.toLowerCase().includes(query) ||
+            pair.right_module_name.toLowerCase().includes(query) ||
+            (pair.left_path_prefix || "").toLowerCase().includes(query) ||
+            (pair.right_path_prefix || "").toLowerCase().includes(query)
+        );
+
+    return [...filteredItems].sort((left, right) => {
+      if (moduleSortBy === "recent") {
+        const leftTime = left.last_cochanged_at ? new Date(left.last_cochanged_at).getTime() : 0;
+        const rightTime = right.last_cochanged_at ? new Date(right.last_cochanged_at).getTime() : 0;
+        if (rightTime !== leftTime) {
+          return rightTime - leftTime;
+        }
+      } else {
+        if (right.cochange_count !== left.cochange_count) {
+          return right.cochange_count - left.cochange_count;
+        }
+      }
+
+      return `${left.left_module_name} ${left.right_module_name}`.localeCompare(`${right.left_module_name} ${right.right_module_name}`);
+    });
+  }, [dashboard, moduleSearchQuery, moduleSortBy]);
+
+  if (status === "loading") {
+    return (
+      <section className="dashboard-shell">
+        <div className="dashboard-empty-state">
+          <strong>Loading co-change pairs…</strong>
+          <p>Fetching file pairs that frequently move together from synced commit history.</p>
+        </div>
+      </section>
+    );
+  }
+
+  if (status === "failed") {
+    return (
+      <section className="dashboard-shell">
+        <div className="dashboard-empty-state">
+          <strong>Co-change detail unavailable</strong>
+          <p>{error || "We could not load co-change details right now."}</p>
+          <button type="button" className="button button-secondary button-small" onClick={onBack}>
+            Back to dashboard
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (!dashboard) {
+    return null;
+  }
+
+  return (
+    <section className="dashboard-shell">
+      <section className="dashboard-subpage-hero">
+        <div>
+          <div className="dashboard-breadcrumb">
+            <button type="button" className="link-button" onClick={onBack}>
+              {repo.name}
+            </button>
+            <span>/</span>
+            <span>Co-change</span>
+          </div>
+          <h1>Co-change pairs</h1>
+          <p>
+            File pairs for <strong>{repo.full_name}</strong> that frequently changed in the same commit.
+          </p>
+        </div>
+      </section>
+
+      <section className="dashboard-toolbar">
+        <label className="dashboard-search-field">
+          <span>Search file pairs</span>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search by either file path"
+          />
+        </label>
+
+        <label className="dashboard-select-field">
+          <span>Sort by</span>
+          <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
+            <option value="frequency">Most shared commits</option>
+            <option value="recent">Most recent pair</option>
+          </select>
+        </label>
+      </section>
+
+      <section className="dashboard-panel">
+        <div className="dashboard-panel-head">
+          <div>
+            <h3>Focused file investigation</h3>
+            <p>
+              {focusedPath
+                ? `Showing the strongest co-change neighbors for ${focusedPath}.`
+                : "Click a file path below to pivot the page around one file and inspect its neighbors."}
+            </p>
+          </div>
+          {focusedPath ? (
+            <button type="button" className="button button-secondary button-small" onClick={() => setFocusedPath("")}>
+              Clear focus
+            </button>
+          ) : null}
+        </div>
+
+        {focusedPath ? (
+          <div className="dashboard-inline-state">
+            <strong>{focusedPath}</strong>
+            <span>
+              {focusedStatus === "loading"
+                ? "Loading focused file pairs…"
+                : focusedStatus === "failed"
+                  ? focusedError
+                  : `${formatCount(focusedPairs.length)} related pair${focusedPairs.length === 1 ? "" : "s"} loaded`}
+            </span>
+          </div>
+        ) : (
+          <div className="dashboard-empty-panel">
+            <strong>No focused file selected</strong>
+            <p>Choose a file from any co-change pair below and CodeAtlas will reload the list centered on that file.</p>
+          </div>
+        )}
+      </section>
+
+      {pairs.length === 0 ? (
+        <section className="dashboard-panel">
+          <div className="dashboard-empty-panel">
+            <strong>{searchQuery ? "No file pairs match this search" : "No co-change data yet"}</strong>
+            <p>{searchQuery ? "Try a different file path." : "Complete a repository sync to compute file pairs that commonly move together."}</p>
+          </div>
+        </section>
+      ) : (
+        <section className="dashboard-module-detail-list">
+          {pairs.map((pair, index) => (
+            <section className="dashboard-panel" key={`${pair.left_path}-${pair.right_path}`}>
+              <div className="dashboard-panel-head">
+                <div>
+                  <h3>{`${pair.left_path} ↔ ${pair.right_path}`}</h3>
+                  <p>{`Rank #${index + 1} by shared commits`}</p>
+                </div>
+                <div className="dashboard-module-badges">
+                  <span className="dashboard-badge dashboard-badge-primary">{`${formatCount(pair.cochange_count)} shared commits`}</span>
+                  <span className="dashboard-badge">{formatRelativeDate(pair.last_cochanged_at)}</span>
+                </div>
+              </div>
+
+              <div className="dashboard-overview-grid">
+                <div className="overview-item">
+                  <span>Left file</span>
+                  <button type="button" className="dashboard-path-button" title={pair.left_path} onClick={() => setFocusedPath(pair.left_path)}>
+                    {pair.left_path}
+                  </button>
+                </div>
+                <div className="overview-item">
+                  <span>Right file</span>
+                  <button type="button" className="dashboard-path-button" title={pair.right_path} onClick={() => setFocusedPath(pair.right_path)}>
+                    {pair.right_path}
+                  </button>
+                </div>
+                <div className="overview-item">
+                  <span>Shared commits</span>
+                  <strong>{formatCount(pair.cochange_count)}</strong>
+                </div>
+                <div className="overview-item">
+                  <span>Last seen together</span>
+                  <strong>{formatRelativeDate(pair.last_cochanged_at)}</strong>
+                </div>
+              </div>
+            </section>
+          ))}
+        </section>
+      )}
+
+      <section className="dashboard-subpage-hero">
+        <div>
+          <h1>Module-to-module co-change</h1>
+          <p>Higher-level module coupling signals based on modules that frequently show up in the same commits.</p>
+        </div>
+      </section>
+
+      <section className="dashboard-toolbar">
+        <label className="dashboard-search-field">
+          <span>Search module pairs</span>
+          <input
+            type="text"
+            value={moduleSearchQuery}
+            onChange={(event) => setModuleSearchQuery(event.target.value)}
+            placeholder="Search by module name or path prefix"
+          />
+        </label>
+
+        <label className="dashboard-select-field">
+          <span>Sort by</span>
+          <select value={moduleSortBy} onChange={(event) => setModuleSortBy(event.target.value)}>
+            <option value="frequency">Most shared commits</option>
+            <option value="recent">Most recent pair</option>
+          </select>
+        </label>
+      </section>
+
+      {modulePairs.length === 0 ? (
+        <section className="dashboard-panel">
+          <div className="dashboard-empty-panel">
+            <strong>{moduleSearchQuery ? "No module pairs match this search" : "No module co-change data yet"}</strong>
+            <p>{moduleSearchQuery ? "Try a different module name or path." : "Complete a repository sync to compute module-level co-change pairs."}</p>
+          </div>
+        </section>
+      ) : (
+        <section className="dashboard-module-detail-list">
+          {modulePairs.map((pair, index) => (
+            <section className="dashboard-panel" key={`${pair.left_path_prefix}-${pair.right_path_prefix}`}>
+              <div className="dashboard-panel-head">
+                <div>
+                  <h3>{`${pair.left_module_name} ↔ ${pair.right_module_name}`}</h3>
+                  <p>{`Rank #${index + 1} by shared commits`}</p>
+                </div>
+                <div className="dashboard-module-badges">
+                  <span className="dashboard-badge dashboard-badge-primary">{`${formatCount(pair.cochange_count)} shared commits`}</span>
+                  <span className="dashboard-badge">{formatRelativeDate(pair.last_cochanged_at)}</span>
+                </div>
+              </div>
+
+              <div className="dashboard-overview-grid">
+                <div className="overview-item">
+                  <span>Left module</span>
+                  <strong>{pair.left_module_name}</strong>
+                  <p>{formatModulePath(pair.left_path_prefix)}</p>
+                </div>
+                <div className="overview-item">
+                  <span>Right module</span>
+                  <strong>{pair.right_module_name}</strong>
+                  <p>{formatModulePath(pair.right_path_prefix)}</p>
+                </div>
+                <div className="overview-item">
+                  <span>Shared commits</span>
+                  <strong>{formatCount(pair.cochange_count)}</strong>
+                </div>
+                <div className="overview-item">
+                  <span>Last seen together</span>
+                  <strong>{formatRelativeDate(pair.last_cochanged_at)}</strong>
+                </div>
+              </div>
+            </section>
+          ))}
+        </section>
+      )}
     </section>
   );
 }
@@ -1441,12 +2474,54 @@ function getRepositorySyncHeadline(repo, latestSyncRun) {
   }
 }
 
+function getSyncHealthTitle(syncRun) {
+  switch ((syncRun?.status || "").toLowerCase()) {
+    case "failed":
+      return "Latest sync needs attention";
+    case "running":
+      return "Repository sync is in progress";
+    case "queued":
+      return "Repository sync is queued";
+    case "succeeded":
+      return "Latest sync completed successfully";
+    default:
+      return "Repository sync status";
+  }
+}
+
+function getSyncHealthBody(syncRun) {
+  if (!syncRun) {
+    return "No sync has been recorded yet.";
+  }
+
+  if (syncRun.status === "failed") {
+    return syncRun.error_message || "The latest sync failed before the repository snapshot could finish importing.";
+  }
+
+  if (syncRun.status === "running") {
+    return "CodeAtlas is currently importing contributors, commits, files, and analytics for this repository.";
+  }
+
+  if (syncRun.status === "queued") {
+    return "The sync worker has not picked up this request yet. The repository should start importing shortly.";
+  }
+
+  return formatSyncRunDetail(syncRun);
+}
+
 function getCurrentRoute() {
   const pathname = window.location.pathname || "/";
-  const match = pathname.match(/^\/repos\/(\d+)(?:\/dashboard)?\/?$/);
+  const match = pathname.match(/^\/repos\/(\d+)(?:\/(dashboard|modules|hotspots|co-change))?\/?$/);
   if (match) {
     return {
-      view: "dashboard",
+      view:
+        match[2] === "modules"
+          ? "modules"
+          : match[2] === "hotspots"
+            ? "hotspots"
+            : match[2] === "co-change"
+              ? "cochange"
+              : "dashboard",
       repositoryId: match[1]
     };
   }
@@ -1457,8 +2532,9 @@ function getCurrentRoute() {
   };
 }
 
-function getDashboardHighlights(repo, latestSyncRun, topContributors) {
+function getDashboardHighlights(repo, overview, latestSyncRun, topContributors, moduleBusFactor) {
   const topContributor = topContributors[0];
+  const highestRiskModule = moduleBusFactor.find((module) => module.risk === "high") || moduleBusFactor[0];
 
   return [
     {
@@ -1468,21 +2544,23 @@ function getDashboardHighlights(repo, latestSyncRun, topContributors) {
         : "Queue the first sync to populate commit, file, module, and contributor insights."
     },
     {
-      title: latestSyncRun?.summary?.files_count ? `${latestSyncRun.summary.files_count} files mapped` : "Codebase mapping pending",
-      body: latestSyncRun?.summary?.modules_count
-        ? `${latestSyncRun.summary.modules_count} modules are currently represented from the latest synced repository snapshot.`
+      title: overview.total_files ? `${formatCount(overview.total_files)} files mapped` : "Codebase mapping pending",
+      body: overview.total_modules
+        ? `${formatCount(overview.total_modules)} modules are currently represented from the latest synced repository snapshot.`
         : "Module and file structure appears here after the first completed import."
     },
     {
-      title: topContributor ? `${topContributor.username} is currently the top visible contributor` : "Contributor ownership will appear after sync",
-      body: topContributor
-        ? `${formatContributionLabel(topContributor.contributions_count)} are currently associated with ${topContributor.username} in synced contributor data.`
-        : "Top contributors and ownership hints will populate once contributor import completes."
+      title: highestRiskModule ? `${highestRiskModule.module_name} needs the most ownership attention` : topContributor ? `${topContributor.username} is currently the top visible contributor` : "Contributor ownership will appear after sync",
+      body: highestRiskModule
+        ? `${formatRiskLabel(highestRiskModule.risk)} risk with bus factor ${highestRiskModule.bus_factor || 0} and top owner concentration at ${formatPercent(highestRiskModule.top_owner_percent)}.`
+        : topContributor
+          ? `${formatContributionLabel(topContributor.contributions_count)} are currently associated with ${topContributor.username} in synced contributor data.`
+          : "Top contributors and ownership hints will populate once contributor import completes."
     }
   ];
 }
 
-function getDashboardMetrics(repo, latestSyncRun, recentSyncRuns, topContributors) {
+function getDashboardMetrics(repo, overview, latestSyncRun, recentSyncRuns, topContributors) {
   return [
     {
       label: "Sync status",
@@ -1491,22 +2569,22 @@ function getDashboardMetrics(repo, latestSyncRun, recentSyncRuns, topContributor
     },
     {
       label: "Contributors",
-      value: formatCount(latestSyncRun?.summary?.contributors_count || topContributors.length),
+      value: formatCount(overview.total_contributors || latestSyncRun?.summary?.contributors_count || topContributors.length),
       meta: "Stored contributor records"
     },
     {
       label: "Commits synced",
-      value: formatCount(latestSyncRun?.summary?.commits_count),
-      meta: "Latest completed import"
+      value: formatCount(overview.total_commits || latestSyncRun?.summary?.commits_count),
+      meta: "Repository commit records stored"
     },
     {
       label: "Files mapped",
-      value: formatCount(latestSyncRun?.summary?.files_count),
+      value: formatCount(overview.total_files || latestSyncRun?.summary?.files_count),
       meta: "Repository files currently indexed"
     },
     {
       label: "Modules mapped",
-      value: formatCount(latestSyncRun?.summary?.modules_count),
+      value: formatCount(overview.total_modules || latestSyncRun?.summary?.modules_count),
       meta: "Top-level modules derived from files"
     },
     {
@@ -1515,6 +2593,202 @@ function getDashboardMetrics(repo, latestSyncRun, recentSyncRuns, topContributor
       meta: "Most recent attempts retained on this page"
     }
   ];
+}
+
+function getModuleSummary(moduleOwnership, moduleExpertise, moduleBusFactor) {
+  const highestRiskModule = moduleBusFactor.find((module) => module.risk === "high") || moduleBusFactor[0];
+  const strongestOwnerModule = moduleOwnership.find((module) => module.owners && module.owners.length > 0);
+  const strongestExpertModule = moduleExpertise.find((module) => module.experts && module.experts.length > 0);
+  const cards = [];
+
+  if (highestRiskModule) {
+    cards.push({
+      title: "Bus factor risk",
+      primary: highestRiskModule.module_name,
+      secondary: `Bus factor ${highestRiskModule.bus_factor || 0} with top owner concentration at ${formatPercent(highestRiskModule.top_owner_percent)}.`,
+      meta: formatRiskLabel(highestRiskModule.risk),
+      metaClass: getRiskBadgeClass(highestRiskModule.risk)
+    });
+  }
+
+  if (strongestOwnerModule) {
+    const owner = strongestOwnerModule.owners[0];
+    cards.push({
+      title: "Strongest owner signal",
+      primary: owner ? owner.username : strongestOwnerModule.module_name,
+      secondary: owner
+        ? `${strongestOwnerModule.module_name} at ${formatPercent(owner.ownership_percent)} ownership.`
+        : `Ownership is tracked for ${strongestOwnerModule.module_name}.`,
+      meta: strongestOwnerModule.module_name
+    });
+  }
+
+  if (strongestExpertModule) {
+    const expert = strongestExpertModule.experts[0];
+    cards.push({
+      title: "Best review candidate",
+      primary: expert ? expert.username : strongestExpertModule.module_name,
+      secondary: expert
+        ? `${strongestExpertModule.module_name} with expertise score ${expert.score}.`
+        : `Expertise is tracked for ${strongestExpertModule.module_name}.`,
+      meta: strongestExpertModule.module_name
+    });
+  }
+
+  return cards.slice(0, 3);
+}
+
+function getHotspotSummary(hotspots) {
+  const highestChurn = hotspots[0];
+  const mostTouched = [...hotspots].sort((left, right) => right.commit_count - left.commit_count)[0];
+  const largestAddition = [...hotspots].sort((left, right) => right.lines_added - left.lines_added)[0];
+  const cards = [];
+
+  if (highestChurn) {
+    cards.push({
+      title: "Highest churn file",
+      primary: highestChurn.path,
+      secondary: `${formatCount(highestChurn.churn)} total churn across ${formatCount(highestChurn.commit_count)} commits.`,
+      meta: "Most volatile"
+    });
+  }
+
+  if (mostTouched) {
+    cards.push({
+      title: "Most touched file",
+      primary: mostTouched.path,
+      secondary: `${formatCount(mostTouched.commit_count)} commit touches with ${formatCount(mostTouched.lines_deleted)} deleted lines.`,
+      meta: "Most revisited"
+    });
+  }
+
+  if (largestAddition) {
+    cards.push({
+      title: "Largest additions",
+      primary: largestAddition.path,
+      secondary: `${formatCount(largestAddition.lines_added)} lines added and ${formatCount(largestAddition.lines_deleted)} lines deleted.`,
+      meta: "Highest growth"
+    });
+  }
+
+  return cards.slice(0, 3);
+}
+
+function getCoChangeSummary(coChanges) {
+  const strongestPair = coChanges[0];
+  const mostRecentPair = [...coChanges]
+    .filter((pair) => Boolean(pair.last_cochanged_at))
+    .sort((left, right) => new Date(right.last_cochanged_at).getTime() - new Date(left.last_cochanged_at).getTime())[0];
+  const broadestPair = [...coChanges].sort((left, right) => {
+    const leftLength = `${left.left_path} ${left.right_path}`.length;
+    const rightLength = `${right.left_path} ${right.right_path}`.length;
+    return rightLength - leftLength;
+  })[0];
+  const cards = [];
+
+  if (strongestPair) {
+    cards.push({
+      title: "Strongest pair",
+      primary: `${strongestPair.left_path} ↔ ${strongestPair.right_path}`,
+      secondary: `${formatCount(strongestPair.cochange_count)} shared commits in the current sync dataset.`,
+      meta: "Highest overlap"
+    });
+  }
+
+  if (mostRecentPair) {
+    cards.push({
+      title: "Most recently linked",
+      primary: `${mostRecentPair.left_path} ↔ ${mostRecentPair.right_path}`,
+      secondary: `Seen together ${formatRelativeDate(mostRecentPair.last_cochanged_at)}.`,
+      meta: "Fresh signal"
+    });
+  }
+
+  if (broadestPair) {
+    cards.push({
+      title: "Another likely dependency",
+      primary: `${broadestPair.left_path} ↔ ${broadestPair.right_path}`,
+      secondary: `${formatCount(broadestPair.cochange_count)} shared commits recorded so far.`,
+      meta: "Investigate"
+    });
+  }
+
+  return cards.slice(0, 3);
+}
+
+function mergeModuleAnalytics(moduleOwnership, moduleExpertise, moduleBusFactor) {
+  const moduleMap = new Map();
+
+  moduleOwnership.forEach((module) => {
+    moduleMap.set(module.module_id, {
+      module_id: module.module_id,
+      module_name: module.module_name,
+      path_prefix: module.path_prefix,
+      bus_factor: module.bus_factor,
+      active_contributors: module.active_contributors,
+      top_owner_percent: module.top_owner_percent,
+      risk: module.risk,
+      owners: module.owners || [],
+      experts: []
+    });
+  });
+
+  moduleExpertise.forEach((module) => {
+    const current = moduleMap.get(module.module_id) || {
+      module_id: module.module_id,
+      module_name: module.module_name,
+      path_prefix: module.path_prefix,
+      bus_factor: 0,
+      active_contributors: 0,
+      top_owner_percent: 0,
+      risk: "unknown",
+      owners: [],
+      experts: []
+    };
+    current.experts = module.experts || [];
+    moduleMap.set(module.module_id, current);
+  });
+
+  moduleBusFactor.forEach((module) => {
+    const current = moduleMap.get(module.module_id) || {
+      module_id: module.module_id,
+      module_name: module.module_name,
+      path_prefix: module.path_prefix,
+      bus_factor: 0,
+      active_contributors: 0,
+      top_owner_percent: 0,
+      risk: "unknown",
+      owners: [],
+      experts: []
+    };
+    current.bus_factor = module.bus_factor;
+    current.active_contributors = module.active_contributors;
+    current.top_owner_percent = module.top_owner_percent;
+    current.risk = module.risk;
+    moduleMap.set(module.module_id, current);
+  });
+
+  return Array.from(moduleMap.values()).sort((left, right) => {
+    const leftRisk = riskOrder(left.risk);
+    const rightRisk = riskOrder(right.risk);
+    if (leftRisk !== rightRisk) {
+      return leftRisk - rightRisk;
+    }
+    return left.module_name.localeCompare(right.module_name);
+  });
+}
+
+function riskOrder(risk) {
+  switch ((risk || "").toLowerCase()) {
+    case "high":
+      return 0;
+    case "medium":
+      return 1;
+    case "low":
+      return 2;
+    default:
+      return 3;
+  }
 }
 
 function formatSyncStatusForBadge(status) {
@@ -1560,6 +2834,43 @@ function formatDuration(durationMs) {
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
   return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+}
+
+function formatPercent(value) {
+  if (value == null || Number.isNaN(Number(value))) {
+    return "0%";
+  }
+  return `${Number(value).toFixed(1)}%`;
+}
+
+function formatModulePath(pathPrefix) {
+  return pathPrefix && pathPrefix !== "." ? pathPrefix : "Repository root";
+}
+
+function formatRiskLabel(risk) {
+  switch ((risk || "").toLowerCase()) {
+    case "high":
+      return "High";
+    case "medium":
+      return "Medium";
+    case "low":
+      return "Low";
+    default:
+      return "Unknown";
+  }
+}
+
+function getRiskBadgeClass(risk) {
+  switch ((risk || "").toLowerCase()) {
+    case "high":
+      return "dashboard-badge-danger";
+    case "medium":
+      return "dashboard-badge-warning";
+    case "low":
+      return "dashboard-badge-success";
+    default:
+      return "dashboard-badge-muted";
+  }
 }
 
 function formatRelativeDate(value) {

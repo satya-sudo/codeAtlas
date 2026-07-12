@@ -1,12 +1,14 @@
 package repos
 
+import "time"
+
 type RepositoryDashboard struct {
-	Repository       Repository         `json:"repository"`
-	Overview         RepositoryOverview `json:"overview"`
-	Hotspots         []RepositoryHotspot `json:"hotspots"`
-	LatestSyncRun    *SyncRun           `json:"latest_sync_run,omitempty"`
-	RecentSyncRuns   []SyncRun          `json:"recent_sync_runs"`
-	TopContributors  []Contributor      `json:"top_contributors"`
+	Repository      Repository          `json:"repository"`
+	Overview        RepositoryOverview  `json:"overview"`
+	Hotspots        []RepositoryHotspot `json:"hotspots"`
+	LatestSyncRun   *SyncRun            `json:"latest_sync_run,omitempty"`
+	RecentSyncRuns  []SyncRun           `json:"recent_sync_runs"`
+	TopContributors []Contributor       `json:"top_contributors"`
 }
 
 type RepositoryOverview struct {

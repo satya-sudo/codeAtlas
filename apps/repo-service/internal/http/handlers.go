@@ -55,12 +55,44 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	})
 
 	mux.Handle("/repos", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleRepositories)))
+	mux.Handle("/repos/sync-status", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleRepositoriesSyncStatus)))
 	mux.Handle("/repos/", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleRepositoryByID)))
 	mux.Handle("/integrations/github/install", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleGitHubInstallURL)))
 	mux.HandleFunc("/integrations/github/setup", h.handleGitHubSetup)
 	mux.Handle("/integrations/github/installations", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleGitHubInstallations)))
 	mux.Handle("/integrations/github/installations/claim", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleClaimInstallation)))
 	mux.Handle("/integrations/github/installations/", AuthMiddleware(h.tokenManager)(http.HandlerFunc(h.handleGitHubInstallationRoutes)))
+}
+
+func (h *Handler) handleRepositoriesSyncStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	userID, ok := CurrentUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "user not found in token",
+		})
+		return
+	}
+
+	statuses, err := h.repositoryRepo.ListLatestSyncStatusForUser(r.Context(), userID)
+	if err != nil {
+		h.logger.Error("list latest sync status for user", "user_id", userID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to list repository sync status",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"repositories": statuses,
+	})
 }
 
 type claimInstallationRequest struct {
@@ -557,6 +589,12 @@ func (h *Handler) handleRepositoryByID(w http.ResponseWriter, r *http.Request) {
 	switch parts[1] {
 	case "dashboard":
 		h.handleRepositoryDashboard(w, r, userID, repositoryID)
+	case "co-change":
+		h.handleRepositoryCoChange(w, r, userID, repositoryID)
+	case "hotspots":
+		h.handleRepositoryHotspots(w, r, userID, repositoryID)
+	case "modules":
+		h.handleRepositoryModules(w, r, userID, repositoryID, parts[2:])
 	case "sync":
 		h.handleRepositorySync(w, r, userID, repositoryID)
 	case "sync-runs":
@@ -568,6 +606,120 @@ func (h *Handler) handleRepositoryByID(w http.ResponseWriter, r *http.Request) {
 			"error": "route not found",
 		})
 	}
+}
+
+func (h *Handler) handleRepositoryModules(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64, parts []string) {
+	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "missing module analytics route",
+		})
+		return
+	}
+
+	switch parts[0] {
+	case "ownership":
+		h.handleRepositoryModuleOwnership(w, r, userID, repositoryID)
+	case "expertise":
+		h.handleRepositoryModuleExpertise(w, r, userID, repositoryID)
+	case "bus-factor":
+		h.handleRepositoryModuleBusFactor(w, r, userID, repositoryID)
+	case "co-change":
+		h.handleRepositoryModuleCoChange(w, r, userID, repositoryID)
+	default:
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "route not found",
+		})
+	}
+}
+
+func (h *Handler) handleRepositoryModuleOwnership(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	modules, err := h.repositoryRepo.ListModuleOwnershipForRepository(r.Context(), userID, repositoryID)
+	if err != nil {
+		if errors.Is(err, repository.ErrRepositoryNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "repository not found",
+			})
+			return
+		}
+
+		h.logger.Error("list module ownership", "repository_id", repositoryID, "user_id", userID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to list module ownership",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"modules": modules,
+	})
+}
+
+func (h *Handler) handleRepositoryModuleExpertise(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	modules, err := h.repositoryRepo.ListModuleExpertiseForRepository(r.Context(), userID, repositoryID)
+	if err != nil {
+		if errors.Is(err, repository.ErrRepositoryNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "repository not found",
+			})
+			return
+		}
+
+		h.logger.Error("list module expertise", "repository_id", repositoryID, "user_id", userID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to list module expertise",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"modules": modules,
+	})
+}
+
+func (h *Handler) handleRepositoryModuleBusFactor(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	modules, err := h.repositoryRepo.ListModuleBusFactorForRepository(r.Context(), userID, repositoryID)
+	if err != nil {
+		if errors.Is(err, repository.ErrRepositoryNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "repository not found",
+			})
+			return
+		}
+
+		h.logger.Error("list module bus factor", "repository_id", repositoryID, "user_id", userID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to list module bus factor",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"modules": modules,
+	})
 }
 
 func (h *Handler) handleRepositoryDashboard(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64) {
@@ -597,6 +749,147 @@ func (h *Handler) handleRepositoryDashboard(w http.ResponseWriter, r *http.Reque
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"dashboard": dashboard,
+	})
+}
+
+func (h *Handler) handleRepositoryHotspots(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	limit := 20
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		parsedLimit, err := parseInt64(rawLimit)
+		if err != nil || parsedLimit <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid limit",
+			})
+			return
+		}
+
+		if parsedLimit > 100 {
+			parsedLimit = 100
+		}
+		limit = int(parsedLimit)
+	}
+
+	hotspots, err := h.repositoryRepo.ListHotspotsForRepository(r.Context(), userID, repositoryID, limit)
+	if err != nil {
+		if errors.Is(err, repository.ErrRepositoryNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "repository not found",
+			})
+			return
+		}
+
+		h.logger.Error("list repository hotspots", "repository_id", repositoryID, "user_id", userID, "limit", limit, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to list repository hotspots",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hotspots": hotspots,
+	})
+}
+
+func (h *Handler) handleRepositoryCoChange(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	limit := 20
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		parsedLimit, err := parseInt64(rawLimit)
+		if err != nil || parsedLimit <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid limit",
+			})
+			return
+		}
+
+		if parsedLimit > 100 {
+			parsedLimit = 100
+		}
+		limit = int(parsedLimit)
+	}
+
+	pathFilter := strings.TrimSpace(r.URL.Query().Get("path"))
+
+	pairs, err := h.repositoryRepo.ListCoChangeForRepository(r.Context(), userID, repositoryID, limit, pathFilter)
+	if err != nil {
+		if errors.Is(err, repository.ErrRepositoryNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "repository not found",
+			})
+			return
+		}
+
+		h.logger.Error("list repository co-change", "repository_id", repositoryID, "user_id", userID, "limit", limit, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to list repository co-change",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"focused_path": pathFilter,
+		"co_changes":   pairs,
+	})
+}
+
+func (h *Handler) handleRepositoryModuleCoChange(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	limit := 20
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		parsedLimit, err := parseInt64(rawLimit)
+		if err != nil || parsedLimit <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid limit",
+			})
+			return
+		}
+
+		if parsedLimit > 100 {
+			parsedLimit = 100
+		}
+		limit = int(parsedLimit)
+	}
+
+	pairs, err := h.repositoryRepo.ListModuleCoChangeForRepository(r.Context(), userID, repositoryID, limit)
+	if err != nil {
+		if errors.Is(err, repository.ErrRepositoryNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "repository not found",
+			})
+			return
+		}
+
+		h.logger.Error("list module co-change", "repository_id", repositoryID, "user_id", userID, "limit", limit, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to list module co-change",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"module_co_changes": pairs,
 	})
 }
 

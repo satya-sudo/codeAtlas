@@ -315,10 +315,16 @@ components:
             $ref: '#/components/schemas/Contributor'
     RepositoryDashboard:
       type: object
-      required: [repository, recent_sync_runs, top_contributors]
+      required: [repository, overview, hotspots, recent_sync_runs, top_contributors]
       properties:
         repository:
           $ref: '#/components/schemas/Repository'
+        overview:
+          $ref: '#/components/schemas/RepositoryOverview'
+        hotspots:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepositoryHotspot'
         latest_sync_run:
           allOf:
             - $ref: '#/components/schemas/SyncRun'
@@ -331,12 +337,245 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Contributor'
+    RepositoryOverview:
+      type: object
+      required: [total_commits, total_contributors, total_files, total_modules]
+      properties:
+        total_commits:
+          type: integer
+        total_contributors:
+          type: integer
+        total_files:
+          type: integer
+        total_modules:
+          type: integer
+        last_synced_at:
+          type: string
+          format: date-time
+          nullable: true
+        latest_sync_duration_ms:
+          type: integer
+          format: int64
+          nullable: true
+    RepositoryHotspot:
+      type: object
+      required: [path, commit_count, lines_added, lines_deleted, churn]
+      properties:
+        path:
+          type: string
+        commit_count:
+          type: integer
+        lines_added:
+          type: integer
+        lines_deleted:
+          type: integer
+        churn:
+          type: integer
+    RepositoryHotspotsResponse:
+      type: object
+      required: [hotspots]
+      properties:
+        hotspots:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepositoryHotspot'
+    RepositoryCoChange:
+      type: object
+      required: [left_path, right_path, cochange_count]
+      properties:
+        left_path:
+          type: string
+        right_path:
+          type: string
+        cochange_count:
+          type: integer
+        last_cochanged_at:
+          type: string
+          format: date-time
+          nullable: true
+    ModuleCoChange:
+      type: object
+      required: [left_module_name, left_path_prefix, right_module_name, right_path_prefix, cochange_count]
+      properties:
+        left_module_id:
+          type: integer
+          format: int64
+          nullable: true
+        left_module_name:
+          type: string
+        left_path_prefix:
+          type: string
+        right_module_id:
+          type: integer
+          format: int64
+          nullable: true
+        right_module_name:
+          type: string
+        right_path_prefix:
+          type: string
+        cochange_count:
+          type: integer
+        last_cochanged_at:
+          type: string
+          format: date-time
+          nullable: true
+    RepositoryCoChangeResponse:
+      type: object
+      required: [co_changes]
+      properties:
+        focused_path:
+          type: string
+          nullable: true
+        co_changes:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepositoryCoChange'
+    ModuleCoChangeResponse:
+      type: object
+      required: [module_co_changes]
+      properties:
+        module_co_changes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModuleCoChange'
     RepositoryDashboardResponse:
       type: object
       required: [dashboard]
       properties:
         dashboard:
           $ref: '#/components/schemas/RepositoryDashboard'
+    ModuleOwnershipEntry:
+      type: object
+      required: [username, ownership_percent, commit_count, changes_count, files_touched_count, rank]
+      properties:
+        github_user_id:
+          type: integer
+          format: int64
+          nullable: true
+        username:
+          type: string
+        ownership_percent:
+          type: number
+          format: double
+        commit_count:
+          type: integer
+        changes_count:
+          type: integer
+        files_touched_count:
+          type: integer
+        rank:
+          type: integer
+    ModuleOwnershipInsight:
+      type: object
+      required: [module_id, module_name, path_prefix, bus_factor, active_contributors, top_owner_percent, risk, owners]
+      properties:
+        module_id:
+          type: integer
+          format: int64
+        module_name:
+          type: string
+        path_prefix:
+          type: string
+        bus_factor:
+          type: integer
+        active_contributors:
+          type: integer
+        top_owner_percent:
+          type: number
+          format: double
+        risk:
+          type: string
+          enum: [low, medium, high, unknown]
+        owners:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModuleOwnershipEntry'
+    ModuleOwnershipResponse:
+      type: object
+      required: [modules]
+      properties:
+        modules:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModuleOwnershipInsight'
+    ModuleExpertiseEntry:
+      type: object
+      required: [username, score, raw_score, commit_count, files_touched_count, recent_commit_count, rank]
+      properties:
+        github_user_id:
+          type: integer
+          format: int64
+          nullable: true
+        username:
+          type: string
+        score:
+          type: integer
+        raw_score:
+          type: integer
+        commit_count:
+          type: integer
+        files_touched_count:
+          type: integer
+        recent_commit_count:
+          type: integer
+        last_commit_at:
+          type: string
+          format: date-time
+          nullable: true
+        rank:
+          type: integer
+    ModuleExpertiseInsight:
+      type: object
+      required: [module_id, module_name, path_prefix, experts]
+      properties:
+        module_id:
+          type: integer
+          format: int64
+        module_name:
+          type: string
+        path_prefix:
+          type: string
+        experts:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModuleExpertiseEntry'
+    ModuleExpertiseResponse:
+      type: object
+      required: [modules]
+      properties:
+        modules:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModuleExpertiseInsight'
+    ModuleBusFactor:
+      type: object
+      required: [module_id, module_name, path_prefix, bus_factor, active_contributors, top_owner_percent, risk]
+      properties:
+        module_id:
+          type: integer
+          format: int64
+        module_name:
+          type: string
+        path_prefix:
+          type: string
+        bus_factor:
+          type: integer
+        active_contributors:
+          type: integer
+        top_owner_percent:
+          type: number
+          format: double
+        risk:
+          type: string
+          enum: [low, medium, high, unknown]
+    ModuleBusFactorResponse:
+      type: object
+      required: [modules]
+      properties:
+        modules:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModuleBusFactor'
     ConnectRepositoryRequest:
       type: object
       required: [github_repo_id, owner, name, default_branch]
@@ -782,6 +1021,81 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ContributorListResponse'
+  /repos/{repositoryId}/modules/ownership:
+    get:
+      summary: List module ownership insights for a connected repository
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: repositoryId
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Module ownership and bus factor summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModuleOwnershipResponse'
+        '404':
+          description: Repository not found for current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /repos/{repositoryId}/modules/expertise:
+    get:
+      summary: List module expertise insights for a connected repository
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: repositoryId
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Module expertise leaderboard
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModuleExpertiseResponse'
+        '404':
+          description: Repository not found for current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /repos/{repositoryId}/modules/bus-factor:
+    get:
+      summary: List module bus factor summaries for a connected repository
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: repositoryId
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Module bus factor summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModuleBusFactorResponse'
+        '404':
+          description: Repository not found for current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /repos/{repositoryId}/dashboard:
     get:
       summary: Get the first repository dashboard view for a connected repository
@@ -801,6 +1115,129 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RepositoryDashboardResponse'
+        '404':
+          description: Repository not found for current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /repos/{repositoryId}/hotspots:
+    get:
+      summary: List hotspot files for a connected repository
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: repositoryId
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - in: query
+          name: limit
+          required: false
+          description: Maximum number of hotspot files to return. Defaults to 20 and is capped at 100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: Repository hotspots ordered by churn, then commit count
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepositoryHotspotsResponse'
+        '400':
+          description: Invalid limit parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Repository not found for current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /repos/{repositoryId}/co-change:
+    get:
+      summary: List top co-change file pairs for a connected repository
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: repositoryId
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - in: query
+          name: limit
+          required: false
+          description: Maximum number of co-change pairs to return. Defaults to 20 and is capped at 100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+        - in: query
+          name: path
+          required: false
+          description: Optional exact repository file path to focus the pair list on one file.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Repository co-change pairs ordered by frequency
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepositoryCoChangeResponse'
+        '400':
+          description: Invalid limit parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /repos/{repositoryId}/modules/co-change:
+    get:
+      summary: List top module-to-module co-change pairs for a connected repository
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: repositoryId
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - in: query
+          name: limit
+          required: false
+          description: Maximum number of module co-change pairs to return. Defaults to 20 and is capped at 100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: Repository module co-change pairs ordered by frequency
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModuleCoChangeResponse'
+        '400':
+          description: Invalid limit parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Repository not found for current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Repository not found for current user
           content:

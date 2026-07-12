@@ -273,6 +273,39 @@ func (a *App) processRepositorySyncRequested(ctx context.Context, event events.R
 		"duration_ms", time.Since(commitWriteStartedAt).Milliseconds(),
 	)
 
+	analyticsStartedAt := time.Now()
+	if err := a.repos.RebuildModuleAnalytics(ctx, repo.ID); err != nil {
+		return err
+	}
+	a.logger.Debug(
+		"rebuilt module analytics",
+		"sync_run_id", event.SyncRunID,
+		"repository_id", event.RepositoryID,
+		"duration_ms", time.Since(analyticsStartedAt).Milliseconds(),
+	)
+
+	coChangeStartedAt := time.Now()
+	if err := a.repos.RebuildFileCoChange(ctx, repo.ID); err != nil {
+		return err
+	}
+	a.logger.Debug(
+		"rebuilt file co-change analytics",
+		"sync_run_id", event.SyncRunID,
+		"repository_id", event.RepositoryID,
+		"duration_ms", time.Since(coChangeStartedAt).Milliseconds(),
+	)
+
+	moduleCoChangeStartedAt := time.Now()
+	if err := a.repos.RebuildModuleCoChange(ctx, repo.ID); err != nil {
+		return err
+	}
+	a.logger.Debug(
+		"rebuilt module co-change analytics",
+		"sync_run_id", event.SyncRunID,
+		"repository_id", event.RepositoryID,
+		"duration_ms", time.Since(moduleCoChangeStartedAt).Milliseconds(),
+	)
+
 	summary := repository.SyncRunSummary{
 		ContributorsCount: len(contributors),
 		CommitsCount:      commitStats.CommitsCount,

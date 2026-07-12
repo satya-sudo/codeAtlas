@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"codeatlas/apps/repo-service/internal/repos"
 	"github.com/jackc/pgx/v5"
@@ -414,6 +415,163 @@ func (r *RepositoryRepository) ListSyncRunsForRepository(ctx context.Context, us
 	return runs, nil
 }
 
+func (r *RepositoryRepository) ListLatestSyncStatusForUser(ctx context.Context, userID int64) ([]repos.RepositorySyncStatus, error) {
+	const query = `
+		WITH latest_runs AS (
+			SELECT
+				sr.id,
+				sr.repository_id,
+				sr.sync_type,
+				sr.status,
+				sr.error_message,
+				sr.contributors_count,
+				sr.commits_count,
+				sr.commit_files_count,
+				sr.modules_count,
+				sr.files_count,
+				sr.duration_ms,
+				sr.started_at,
+				sr.completed_at,
+				sr.created_at,
+				ROW_NUMBER() OVER (
+					PARTITION BY sr.repository_id
+					ORDER BY sr.created_at DESC, sr.id DESC
+				) AS row_num
+			FROM repository_sync_runs sr
+		)
+		SELECT
+			r.id,
+			r.github_repo_id,
+			r.owner,
+			r.name,
+			r.full_name,
+			r.default_branch,
+			r.is_private,
+			r.installation_id,
+			r.webhook_id,
+			r.sync_status,
+			r.last_synced_at,
+			r.created_at,
+			r.updated_at,
+			lr.id,
+			lr.repository_id,
+			lr.sync_type,
+			lr.status,
+			lr.error_message,
+			lr.contributors_count,
+			lr.commits_count,
+			lr.commit_files_count,
+			lr.modules_count,
+			lr.files_count,
+			lr.duration_ms,
+			lr.started_at,
+			lr.completed_at,
+			lr.created_at
+		FROM repositories r
+		INNER JOIN user_repositories ur ON ur.repository_id = r.id
+		LEFT JOIN latest_runs lr
+			ON lr.repository_id = r.id
+		   AND lr.row_num = 1
+		WHERE ur.user_id = $1
+		ORDER BY r.created_at DESC, r.id DESC
+	`
+
+	rows, err := r.db.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list latest sync status for user: %w", err)
+	}
+	defer rows.Close()
+
+	statuses := make([]repos.RepositorySyncStatus, 0)
+	for rows.Next() {
+		var status repos.RepositorySyncStatus
+		var latestSyncRunID *int64
+		var latestSyncRunRepositoryID *int64
+		var latestSyncRunSyncType *string
+		var latestSyncRunStatus *string
+		var latestSyncRunContributorsCount *int
+		var latestSyncRunCommitsCount *int
+		var latestSyncRunCommitFilesCount *int
+		var latestSyncRunModulesCount *int
+		var latestSyncRunFilesCount *int
+		var latestSyncRunCreatedAt *time.Time
+		var latestSyncRunStartedAt *time.Time
+		var latestSyncRunCompletedAt *time.Time
+		var latestSyncRunErrorMessage *string
+		var latestSyncRunDurationMS *int64
+
+		if err := rows.Scan(
+			&status.Repository.ID,
+			&status.Repository.GitHubRepoID,
+			&status.Repository.Owner,
+			&status.Repository.Name,
+			&status.Repository.FullName,
+			&status.Repository.DefaultBranch,
+			&status.Repository.IsPrivate,
+			&status.Repository.InstallationID,
+			&status.Repository.WebhookID,
+			&status.Repository.SyncStatus,
+			&status.Repository.LastSyncedAt,
+			&status.Repository.CreatedAt,
+			&status.Repository.UpdatedAt,
+			&latestSyncRunID,
+			&latestSyncRunRepositoryID,
+			&latestSyncRunSyncType,
+			&latestSyncRunStatus,
+			&latestSyncRunErrorMessage,
+			&latestSyncRunContributorsCount,
+			&latestSyncRunCommitsCount,
+			&latestSyncRunCommitFilesCount,
+			&latestSyncRunModulesCount,
+			&latestSyncRunFilesCount,
+			&latestSyncRunDurationMS,
+			&latestSyncRunStartedAt,
+			&latestSyncRunCompletedAt,
+			&latestSyncRunCreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan latest sync status: %w", err)
+		}
+
+		if latestSyncRunID != nil && latestSyncRunRepositoryID != nil && latestSyncRunSyncType != nil && latestSyncRunStatus != nil && latestSyncRunCreatedAt != nil {
+			run := repos.SyncRun{
+				ID:           *latestSyncRunID,
+				RepositoryID: *latestSyncRunRepositoryID,
+				SyncType:     *latestSyncRunSyncType,
+				Status:       *latestSyncRunStatus,
+				ErrorMessage: latestSyncRunErrorMessage,
+				StartedAt:    latestSyncRunStartedAt,
+				CompletedAt:  latestSyncRunCompletedAt,
+				CreatedAt:    *latestSyncRunCreatedAt,
+			}
+			if latestSyncRunContributorsCount != nil {
+				run.Summary.ContributorsCount = *latestSyncRunContributorsCount
+			}
+			if latestSyncRunCommitsCount != nil {
+				run.Summary.CommitsCount = *latestSyncRunCommitsCount
+			}
+			if latestSyncRunCommitFilesCount != nil {
+				run.Summary.CommitFilesCount = *latestSyncRunCommitFilesCount
+			}
+			if latestSyncRunModulesCount != nil {
+				run.Summary.ModulesCount = *latestSyncRunModulesCount
+			}
+			if latestSyncRunFilesCount != nil {
+				run.Summary.FilesCount = *latestSyncRunFilesCount
+			}
+			run.Summary.DurationMS = latestSyncRunDurationMS
+			status.LatestSyncRun = &run
+		}
+
+		statuses = append(statuses, status)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate latest sync statuses: %w", err)
+	}
+
+	return statuses, nil
+}
+
 func (r *RepositoryRepository) FindSyncRunForRepository(ctx context.Context, userID int64, repositoryID int64, runID int64) (repos.SyncRun, error) {
 	const query = `
 		SELECT
@@ -534,7 +692,7 @@ func (r *RepositoryRepository) BuildDashboardForRepository(ctx context.Context, 
 		return repos.RepositoryDashboard{}, fmt.Errorf("build overview for dashboard: %w", err)
 	}
 
-	hotspots, err := r.listHotspotsForRepository(ctx, userID, repositoryID)
+	hotspots, err := r.listHotspotsForRepository(ctx, userID, repositoryID, 8)
 	if err != nil {
 		return repos.RepositoryDashboard{}, fmt.Errorf("list hotspots for dashboard: %w", err)
 	}
@@ -604,7 +762,128 @@ func (r *RepositoryRepository) buildOverviewForRepository(ctx context.Context, u
 	return overview, nil
 }
 
-func (r *RepositoryRepository) listHotspotsForRepository(ctx context.Context, userID int64, repositoryID int64) ([]repos.RepositoryHotspot, error) {
+func (r *RepositoryRepository) ListHotspotsForRepository(ctx context.Context, userID int64, repositoryID int64, limit int) ([]repos.RepositoryHotspot, error) {
+	if _, err := r.FindRepositoryForUser(ctx, userID, repositoryID); err != nil {
+		return nil, err
+	}
+
+	return r.listHotspotsForRepository(ctx, userID, repositoryID, limit)
+}
+
+func (r *RepositoryRepository) ListCoChangeForRepository(ctx context.Context, userID int64, repositoryID int64, limit int, pathFilter string) ([]repos.RepositoryCoChange, error) {
+	if _, err := r.FindRepositoryForUser(ctx, userID, repositoryID); err != nil {
+		return nil, err
+	}
+
+	if limit <= 0 {
+		limit = 20
+	}
+
+	const query = `
+		SELECT
+			fc.left_path,
+			fc.right_path,
+			fc.cochange_count,
+			fc.last_cochanged_at
+		FROM file_cochange fc
+		INNER JOIN user_repositories ur ON ur.repository_id = fc.repository_id
+		WHERE ur.user_id = $1
+		  AND fc.repository_id = $2
+		  AND ($3 = '' OR fc.left_path = $3 OR fc.right_path = $3)
+		ORDER BY fc.cochange_count DESC, fc.last_cochanged_at DESC NULLS LAST, fc.left_path ASC, fc.right_path ASC
+		LIMIT $4
+	`
+
+	rows, err := r.db.Query(ctx, query, userID, repositoryID, pathFilter, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query repository co-change: %w", err)
+	}
+	defer rows.Close()
+
+	pairs := make([]repos.RepositoryCoChange, 0, limit)
+	for rows.Next() {
+		var pair repos.RepositoryCoChange
+		if err := rows.Scan(
+			&pair.LeftPath,
+			&pair.RightPath,
+			&pair.CoChangeCount,
+			&pair.LastCochangedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan repository co-change: %w", err)
+		}
+		pairs = append(pairs, pair)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate repository co-change: %w", err)
+	}
+
+	return pairs, nil
+}
+
+func (r *RepositoryRepository) ListModuleCoChangeForRepository(ctx context.Context, userID int64, repositoryID int64, limit int) ([]repos.ModuleCoChange, error) {
+	if _, err := r.FindRepositoryForUser(ctx, userID, repositoryID); err != nil {
+		return nil, err
+	}
+
+	if limit <= 0 {
+		limit = 20
+	}
+
+	const query = `
+		SELECT
+			mc.left_module_id,
+			mc.left_module_name,
+			mc.left_path_prefix,
+			mc.right_module_id,
+			mc.right_module_name,
+			mc.right_path_prefix,
+			mc.cochange_count,
+			mc.last_cochanged_at
+		FROM module_cochange mc
+		INNER JOIN user_repositories ur ON ur.repository_id = mc.repository_id
+		WHERE ur.user_id = $1
+		  AND mc.repository_id = $2
+		ORDER BY mc.cochange_count DESC, mc.last_cochanged_at DESC NULLS LAST, mc.left_path_prefix ASC, mc.right_path_prefix ASC
+		LIMIT $3
+	`
+
+	rows, err := r.db.Query(ctx, query, userID, repositoryID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query module co-change: %w", err)
+	}
+	defer rows.Close()
+
+	pairs := make([]repos.ModuleCoChange, 0, limit)
+	for rows.Next() {
+		var pair repos.ModuleCoChange
+		if err := rows.Scan(
+			&pair.LeftModuleID,
+			&pair.LeftModuleName,
+			&pair.LeftPathPrefix,
+			&pair.RightModuleID,
+			&pair.RightModuleName,
+			&pair.RightPathPrefix,
+			&pair.CoChangeCount,
+			&pair.LastCochangedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan module co-change: %w", err)
+		}
+		pairs = append(pairs, pair)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate module co-change: %w", err)
+	}
+
+	return pairs, nil
+}
+
+func (r *RepositoryRepository) listHotspotsForRepository(ctx context.Context, userID int64, repositoryID int64, limit int) ([]repos.RepositoryHotspot, error) {
+	if limit <= 0 {
+		limit = 8
+	}
+
 	const query = `
 		SELECT
 			cf.path,
@@ -618,16 +897,16 @@ func (r *RepositoryRepository) listHotspotsForRepository(ctx context.Context, us
 		  AND cf.repository_id = $2
 		GROUP BY cf.path
 		ORDER BY churn DESC, commit_count DESC, cf.path ASC
-		LIMIT 8
+		LIMIT $3
 	`
 
-	rows, err := r.db.Query(ctx, query, userID, repositoryID)
+	rows, err := r.db.Query(ctx, query, userID, repositoryID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query repository hotspots: %w", err)
 	}
 	defer rows.Close()
 
-	hotspots := make([]repos.RepositoryHotspot, 0, 8)
+	hotspots := make([]repos.RepositoryHotspot, 0, limit)
 	for rows.Next() {
 		var hotspot repos.RepositoryHotspot
 		if err := rows.Scan(
@@ -647,6 +926,292 @@ func (r *RepositoryRepository) listHotspotsForRepository(ctx context.Context, us
 	}
 
 	return hotspots, nil
+}
+
+func (r *RepositoryRepository) ListModuleOwnershipForRepository(ctx context.Context, userID int64, repositoryID int64) ([]repos.ModuleOwnershipInsight, error) {
+	if _, err := r.FindRepositoryForUser(ctx, userID, repositoryID); err != nil {
+		return nil, err
+	}
+
+	const query = `
+		SELECT
+			m.id,
+			m.name,
+			m.path_prefix,
+			COALESCE(mm.bus_factor, 0) AS bus_factor,
+			COALESCE(mm.active_contributors, 0) AS active_contributors,
+			COALESCE(mm.top_owner_percent::double precision, 0) AS top_owner_percent,
+			COALESCE(mm.risk, 'unknown') AS risk,
+			mo.github_user_id,
+			mo.username,
+			COALESCE(mo.ownership_percent::double precision, 0) AS ownership_percent,
+			COALESCE(mo.commit_count, 0) AS commit_count,
+			COALESCE(mo.changes_count, 0) AS changes_count,
+			COALESCE(mo.files_touched_count, 0) AS files_touched_count,
+			mo.rank
+		FROM modules m
+		INNER JOIN user_repositories ur
+			ON ur.repository_id = m.repository_id
+		LEFT JOIN module_metrics mm
+			ON mm.module_id = m.id
+		LEFT JOIN module_ownership mo
+			ON mo.module_id = m.id
+		WHERE ur.user_id = $1
+		  AND m.repository_id = $2
+		ORDER BY m.path_prefix ASC, m.name ASC, mo.rank ASC NULLS LAST, mo.username ASC NULLS LAST
+	`
+
+	rows, err := r.db.Query(ctx, query, userID, repositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("query module ownership: %w", err)
+	}
+	defer rows.Close()
+
+	modules := make([]repos.ModuleOwnershipInsight, 0)
+	moduleIndexByID := make(map[int64]int)
+
+	for rows.Next() {
+		var (
+			moduleID           int64
+			moduleName         string
+			pathPrefix         string
+			busFactor          int
+			activeContributors int
+			topOwnerPercent    float64
+			risk               string
+			githubUserID       *int64
+			username           *string
+			ownershipPercent   float64
+			commitCount        int
+			changesCount       int
+			filesTouchedCount  int
+			rank               *int
+		)
+
+		if err := rows.Scan(
+			&moduleID,
+			&moduleName,
+			&pathPrefix,
+			&busFactor,
+			&activeContributors,
+			&topOwnerPercent,
+			&risk,
+			&githubUserID,
+			&username,
+			&ownershipPercent,
+			&commitCount,
+			&changesCount,
+			&filesTouchedCount,
+			&rank,
+		); err != nil {
+			return nil, fmt.Errorf("scan module ownership: %w", err)
+		}
+
+		index, ok := moduleIndexByID[moduleID]
+		if !ok {
+			modules = append(modules, repos.ModuleOwnershipInsight{
+				ModuleID:           moduleID,
+				ModuleName:         moduleName,
+				PathPrefix:         pathPrefix,
+				BusFactor:          busFactor,
+				ActiveContributors: activeContributors,
+				TopOwnerPercent:    topOwnerPercent,
+				Risk:               risk,
+				Owners:             []repos.ModuleOwnershipEntry{},
+			})
+			index = len(modules) - 1
+			moduleIndexByID[moduleID] = index
+		}
+
+		if username == nil || *username == "" || rank == nil {
+			continue
+		}
+
+		modules[index].Owners = append(modules[index].Owners, repos.ModuleOwnershipEntry{
+			GitHubUserID:      githubUserID,
+			Username:          *username,
+			OwnershipPercent:  ownershipPercent,
+			CommitCount:       commitCount,
+			ChangesCount:      changesCount,
+			FilesTouchedCount: filesTouchedCount,
+			Rank:              *rank,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate module ownership rows: %w", err)
+	}
+
+	return modules, nil
+}
+
+func (r *RepositoryRepository) ListModuleExpertiseForRepository(ctx context.Context, userID int64, repositoryID int64) ([]repos.ModuleExpertiseInsight, error) {
+	if _, err := r.FindRepositoryForUser(ctx, userID, repositoryID); err != nil {
+		return nil, err
+	}
+
+	const query = `
+		SELECT
+			m.id,
+			m.name,
+			m.path_prefix,
+			me.github_user_id,
+			me.username,
+			me.score,
+			me.raw_score,
+			me.commit_count,
+			me.files_touched_count,
+			me.recent_commit_count,
+			me.last_commit_at,
+			me.rank
+		FROM modules m
+		INNER JOIN user_repositories ur
+			ON ur.repository_id = m.repository_id
+		LEFT JOIN module_expertise me
+			ON me.module_id = m.id
+		WHERE ur.user_id = $1
+		  AND m.repository_id = $2
+		ORDER BY m.path_prefix ASC, m.name ASC, me.rank ASC NULLS LAST, me.username ASC NULLS LAST
+	`
+
+	rows, err := r.db.Query(ctx, query, userID, repositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("query module expertise: %w", err)
+	}
+	defer rows.Close()
+
+	modules := make([]repos.ModuleExpertiseInsight, 0)
+	moduleIndexByID := make(map[int64]int)
+
+	for rows.Next() {
+		var (
+			moduleID          int64
+			moduleName        string
+			pathPrefix        string
+			githubUserID      *int64
+			username          *string
+			score             *int
+			rawScore          *int
+			commitCount       *int
+			filesTouchedCount *int
+			recentCommitCount *int
+			lastCommitAt      *time.Time
+			rank              *int
+		)
+
+		if err := rows.Scan(
+			&moduleID,
+			&moduleName,
+			&pathPrefix,
+			&githubUserID,
+			&username,
+			&score,
+			&rawScore,
+			&commitCount,
+			&filesTouchedCount,
+			&recentCommitCount,
+			&lastCommitAt,
+			&rank,
+		); err != nil {
+			return nil, fmt.Errorf("scan module expertise: %w", err)
+		}
+
+		index, ok := moduleIndexByID[moduleID]
+		if !ok {
+			modules = append(modules, repos.ModuleExpertiseInsight{
+				ModuleID:   moduleID,
+				ModuleName: moduleName,
+				PathPrefix: pathPrefix,
+				Experts:    []repos.ModuleExpertiseEntry{},
+			})
+			index = len(modules) - 1
+			moduleIndexByID[moduleID] = index
+		}
+
+		if username == nil || *username == "" || rank == nil || score == nil || rawScore == nil || commitCount == nil || filesTouchedCount == nil || recentCommitCount == nil {
+			continue
+		}
+
+		modules[index].Experts = append(modules[index].Experts, repos.ModuleExpertiseEntry{
+			GitHubUserID:      githubUserID,
+			Username:          *username,
+			Score:             *score,
+			RawScore:          *rawScore,
+			CommitCount:       *commitCount,
+			FilesTouchedCount: *filesTouchedCount,
+			RecentCommitCount: *recentCommitCount,
+			LastCommitAt:      lastCommitAt,
+			Rank:              *rank,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate module expertise rows: %w", err)
+	}
+
+	return modules, nil
+}
+
+func (r *RepositoryRepository) ListModuleBusFactorForRepository(ctx context.Context, userID int64, repositoryID int64) ([]repos.ModuleBusFactor, error) {
+	if _, err := r.FindRepositoryForUser(ctx, userID, repositoryID); err != nil {
+		return nil, err
+	}
+
+	const query = `
+		SELECT
+			m.id,
+			m.name,
+			m.path_prefix,
+			COALESCE(mm.bus_factor, 0) AS bus_factor,
+			COALESCE(mm.active_contributors, 0) AS active_contributors,
+			COALESCE(mm.top_owner_percent::double precision, 0) AS top_owner_percent,
+			COALESCE(mm.risk, 'unknown') AS risk
+		FROM modules m
+		INNER JOIN user_repositories ur
+			ON ur.repository_id = m.repository_id
+		LEFT JOIN module_metrics mm
+			ON mm.module_id = m.id
+		WHERE ur.user_id = $1
+		  AND m.repository_id = $2
+		ORDER BY
+			CASE COALESCE(mm.risk, 'unknown')
+				WHEN 'high' THEN 1
+				WHEN 'medium' THEN 2
+				WHEN 'low' THEN 3
+				ELSE 4
+			END,
+			m.path_prefix ASC,
+			m.name ASC
+	`
+
+	rows, err := r.db.Query(ctx, query, userID, repositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("query module bus factor: %w", err)
+	}
+	defer rows.Close()
+
+	modules := make([]repos.ModuleBusFactor, 0)
+	for rows.Next() {
+		var module repos.ModuleBusFactor
+		if err := rows.Scan(
+			&module.ModuleID,
+			&module.ModuleName,
+			&module.PathPrefix,
+			&module.BusFactor,
+			&module.ActiveContributors,
+			&module.TopOwnerPercent,
+			&module.Risk,
+		); err != nil {
+			return nil, fmt.Errorf("scan module bus factor: %w", err)
+		}
+		modules = append(modules, module)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate module bus factor rows: %w", err)
+	}
+
+	return modules, nil
 }
 
 func (r *RepositoryRepository) findActiveSyncRunForRepository(ctx context.Context, userID int64, repositoryID int64) (repos.SyncRun, bool, error) {
