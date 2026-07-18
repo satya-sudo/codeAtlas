@@ -20,5 +20,13 @@ kafka-topics \
   --partitions 1 \
   --replication-factor 1
 
+kafka-topics \
+  --bootstrap-server "${BOOTSTRAP_SERVER}" \
+  --create \
+  --if-not-exists \
+  --topic github.push \
+  --partitions 1 \
+  --replication-factor 1
+
 echo "Current topics:"
 kafka-topics --bootstrap-server "${BOOTSTRAP_SERVER}" --list
