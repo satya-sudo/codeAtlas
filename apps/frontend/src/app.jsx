@@ -513,8 +513,8 @@ function App() {
   }, [token, user, deduplicatedConnectedRepositories.length]);
 
   useEffect(() => {
-    if (!token || !user || (route.view !== "dashboard" && route.view !== "modules" && route.view !== "hotspots" && route.view !== "cochange") || !route.repositoryId) {
-      if (route.view !== "dashboard" && route.view !== "modules" && route.view !== "hotspots" && route.view !== "cochange") {
+    if (!token || !user || (route.view !== "dashboard" && route.view !== "modules" && route.view !== "module" && route.view !== "hotspots" && route.view !== "cochange" && route.view !== "contributors") || !route.repositoryId) {
+      if (route.view !== "dashboard" && route.view !== "modules" && route.view !== "module" && route.view !== "hotspots" && route.view !== "cochange" && route.view !== "contributors") {
         setDashboardData(null);
         setDashboardStatus("idle");
         setDashboardError("");
@@ -532,6 +532,51 @@ function App() {
         const headers = {
           Authorization: `Bearer ${token}`
         };
+
+        if (route.view === "module") {
+          const [dashboardResponse, moduleResponse] = await Promise.all([
+            fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/dashboard`, { headers }),
+            fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/modules/${route.moduleId}`, { headers })
+          ]);
+
+          if (dashboardResponse.status === 401 || moduleResponse.status === 401) {
+            localStorage.removeItem(CONFIG.tokenStorageKey);
+            if (!cancelled) {
+              resetSession("Session expired. Sign in again.");
+            }
+            return;
+          }
+
+          if (dashboardResponse.status === 404 || moduleResponse.status === 404) {
+            if (!cancelled) {
+              setDashboardData(null);
+              setDashboardStatus("failed");
+              setDashboardError("This module is not available in your workspace yet.");
+            }
+            return;
+          }
+
+          if (!dashboardResponse.ok) {
+            throw new Error(`dashboard request failed with status ${dashboardResponse.status}`);
+          }
+
+          if (!moduleResponse.ok) {
+            throw new Error(`module detail request failed with status ${moduleResponse.status}`);
+          }
+
+          const dashboardPayload = await dashboardResponse.json();
+          const modulePayload = await moduleResponse.json();
+
+          if (!cancelled) {
+            setDashboardData({
+              ...dashboardPayload.dashboard,
+              module_detail: modulePayload.module || null
+            });
+            setDashboardStatus("ready");
+            setDashboardError("");
+          }
+          return;
+        }
 
         if (route.view === "hotspots") {
           const [dashboardResponse, hotspotsResponse] = await Promise.all([
@@ -630,18 +675,72 @@ function App() {
           return;
         }
 
-        const [dashboardResponse, ownershipResponse, expertiseResponse, busFactorResponse] = await Promise.all([
+        if (route.view === "contributors") {
+          const [dashboardResponse, ownershipResponse, expertiseResponse, contributorsResponse] = await Promise.all([
+            fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/dashboard`, { headers }),
+            fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/modules/ownership`, { headers }),
+            fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/modules/expertise`, { headers }),
+            fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/contributors`, { headers })
+          ]);
+
+          if (
+            dashboardResponse.status === 401 ||
+            ownershipResponse.status === 401 ||
+            expertiseResponse.status === 401 ||
+            contributorsResponse.status === 401
+          ) {
+            localStorage.removeItem(CONFIG.tokenStorageKey);
+            if (!cancelled) {
+              resetSession("Session expired. Sign in again.");
+            }
+            return;
+          }
+
+          if (dashboardResponse.status === 404) {
+            if (!cancelled) {
+              setDashboardData(null);
+              setDashboardStatus("failed");
+              setDashboardError("This repository is not available in your workspace yet.");
+            }
+            return;
+          }
+
+          if (!dashboardResponse.ok) {
+            throw new Error(`dashboard request failed with status ${dashboardResponse.status}`);
+          }
+
+          const dashboardPayload = await dashboardResponse.json();
+          const moduleOwnershipPayload = ownershipResponse.ok ? await ownershipResponse.json() : { modules: [] };
+          const moduleExpertisePayload = expertiseResponse.ok ? await expertiseResponse.json() : { modules: [] };
+          const contributorsPayload = contributorsResponse.ok ? await contributorsResponse.json() : { contributors: [] };
+
+          if (!cancelled) {
+            setDashboardData({
+              ...dashboardPayload.dashboard,
+              module_ownership: moduleOwnershipPayload.modules || [],
+              module_expertise: moduleExpertisePayload.modules || [],
+              contributors: contributorsPayload.contributors || []
+            });
+            setDashboardStatus("ready");
+            setDashboardError("");
+          }
+          return;
+        }
+
+        const [dashboardResponse, ownershipResponse, expertiseResponse, busFactorResponse, moduleCoChangeResponse] = await Promise.all([
           fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/dashboard`, { headers }),
           fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/modules/ownership`, { headers }),
           fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/modules/expertise`, { headers }),
-          fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/modules/bus-factor`, { headers })
+          fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/modules/bus-factor`, { headers }),
+          fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/modules/co-change?limit=6`, { headers })
         ]);
 
         if (
           dashboardResponse.status === 401 ||
           ownershipResponse.status === 401 ||
           expertiseResponse.status === 401 ||
-          busFactorResponse.status === 401
+          busFactorResponse.status === 401 ||
+          moduleCoChangeResponse.status === 401
         ) {
           localStorage.removeItem(CONFIG.tokenStorageKey);
           if (!cancelled) {
@@ -667,6 +766,7 @@ function App() {
         const moduleOwnershipPayload = ownershipResponse.ok ? await ownershipResponse.json() : { modules: [] };
         const moduleExpertisePayload = expertiseResponse.ok ? await expertiseResponse.json() : { modules: [] };
         const moduleBusFactorPayload = busFactorResponse.ok ? await busFactorResponse.json() : { modules: [] };
+        const moduleCoChangePayload = moduleCoChangeResponse.ok ? await moduleCoChangeResponse.json() : { module_co_changes: [] };
         const coChangeResponse = await fetch(`${CONFIG.apiBaseUrl}/repos/${route.repositoryId}/co-change?limit=6`, { headers });
 
         if (coChangeResponse.status === 401) {
@@ -685,7 +785,8 @@ function App() {
             module_ownership: moduleOwnershipPayload.modules || [],
             module_expertise: moduleExpertisePayload.modules || [],
             module_bus_factor: moduleBusFactorPayload.modules || [],
-            co_changes: coChangePayload.co_changes || []
+            co_changes: coChangePayload.co_changes || [],
+            module_co_changes: moduleCoChangePayload.module_co_changes || []
           });
           setDashboardStatus("ready");
           setDashboardError("");
@@ -840,6 +941,9 @@ function App() {
   };
 
   const handleQueueSync = async (repo) => {
+    const latestSyncRun = latestSyncRunsByRepo[repo.id];
+    const isRetry = latestSyncRun?.status === "failed";
+
     setSyncActionStatusByRepo((current) => ({
       ...current,
       [repo.id]: "loading"
@@ -881,7 +985,14 @@ function App() {
         ...current,
         [repo.id]: "success"
       }));
-      setToast(`Queued sync for ${repo.full_name}.`);
+
+      if (payload.request_status === "already_running") {
+        setToast(`A sync is already running for ${repo.full_name}.`);
+      } else if (payload.request_status === "already_queued") {
+        setToast(`A sync is already queued for ${repo.full_name}.`);
+      } else {
+        setToast(`${isRetry ? "Retry queued" : "Queued sync"} for ${repo.full_name}.`);
+      }
     } catch (error) {
       console.error(error);
       setSyncActionStatusByRepo((current) => ({
@@ -890,7 +1001,7 @@ function App() {
       }));
       setSyncActionErrorByRepo((current) => ({
         ...current,
-        [repo.id]: "Could not queue sync."
+        [repo.id]: isRetry ? "Could not retry sync." : "Could not queue sync."
       }));
     }
   };
@@ -908,12 +1019,21 @@ function App() {
     navigateToRoute(`/repos/${repoId}/modules`);
   };
 
-  const openRepositoryHotspots = (repoId) => {
-    navigateToRoute(`/repos/${repoId}/hotspots`);
+  const openRepositoryModuleDetail = (repoId, moduleId) => {
+    navigateToRoute(`/repos/${repoId}/modules/${moduleId}`);
+  };
+
+  const openRepositoryHotspots = (repoId, path = "") => {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    navigateToRoute(`/repos/${repoId}/hotspots${query}`);
   };
 
   const openRepositoryCoChange = (repoId) => {
     navigateToRoute(`/repos/${repoId}/co-change`);
+  };
+
+  const openRepositoryContributors = (repoId) => {
+    navigateToRoute(`/repos/${repoId}/contributors`);
   };
 
   const returnToRepositories = () => {
@@ -975,7 +1095,7 @@ function App() {
           </div>
 
           <div className="topbar-nav">
-            {route.view === "dashboard" || route.view === "modules" || route.view === "hotspots" || route.view === "cochange" ? (
+            {route.view === "dashboard" || route.view === "modules" || route.view === "module" || route.view === "hotspots" || route.view === "cochange" || route.view === "contributors" ? (
               <button type="button" className="link-button topbar-back" onClick={returnToRepositories}>
                 ← Repositories
               </button>
@@ -1002,22 +1122,35 @@ function App() {
               status={dashboardStatus}
               error={dashboardError}
               onBack={returnToRepositories}
+              onRetrySync={handleQueueSync}
               onOpenModules={openRepositoryModules}
+              onOpenModule={openRepositoryModuleDetail}
               onOpenHotspots={openRepositoryHotspots}
               onOpenCoChange={openRepositoryCoChange}
+              onOpenContributors={openRepositoryContributors}
             />
           ) : route.view === "modules" ? (
             <RepositoryModulesPage
               dashboard={dashboardData}
               status={dashboardStatus}
               error={dashboardError}
+              onOpenModule={(moduleId) => openRepositoryModuleDetail(route.repositoryId, moduleId)}
               onBack={() => openRepositoryDashboard(route.repositoryId)}
+            />
+          ) : route.view === "module" ? (
+            <RepositoryModuleDetailPage
+              dashboard={dashboardData}
+              status={dashboardStatus}
+              error={dashboardError}
+              onOpenModule={(moduleId) => openRepositoryModuleDetail(route.repositoryId, moduleId)}
+              onBack={() => openRepositoryModules(route.repositoryId)}
             />
           ) : route.view === "hotspots" ? (
             <RepositoryHotspotsPage
               dashboard={dashboardData}
               status={dashboardStatus}
               error={dashboardError}
+              initialSearch={route.hotspotPath || ""}
               onBack={() => openRepositoryDashboard(route.repositoryId)}
             />
           ) : route.view === "cochange" ? (
@@ -1026,6 +1159,13 @@ function App() {
               status={dashboardStatus}
               error={dashboardError}
               token={token}
+              onBack={() => openRepositoryDashboard(route.repositoryId)}
+            />
+          ) : route.view === "contributors" ? (
+            <RepositoryContributorsPage
+              dashboard={dashboardData}
+              status={dashboardStatus}
+              error={dashboardError}
               onBack={() => openRepositoryDashboard(route.repositoryId)}
             />
           ) : (
@@ -1210,9 +1350,19 @@ function App() {
                       <div className="connected-repo-card" key={repo.id}>
                         {latestSyncRunsByRepo[repo.id]?.status === "failed" ? (
                           <div className="sync-run-alert sync-run-alert-failed">
-                            <strong>Latest sync failed</strong>
-                            <p>{latestSyncRunsByRepo[repo.id]?.error_message || "The last sync ended with an error."}</p>
+                            <strong>{getSyncFailureTitle(latestSyncRunsByRepo[repo.id])}</strong>
+                            <p>{getSyncFailureReason(latestSyncRunsByRepo[repo.id])}</p>
                             <span>{`Last attempt ${formatRelativeDate(latestSyncRunsByRepo[repo.id]?.completed_at || latestSyncRunsByRepo[repo.id]?.started_at || latestSyncRunsByRepo[repo.id]?.created_at)}`}</span>
+                            <div className="sync-run-alert-actions">
+                              <button
+                                type="button"
+                                className={`button button-secondary button-small ${syncActionStatusByRepo[repo.id] === "loading" ? "is-disabled" : ""}`}
+                                disabled={syncActionStatusByRepo[repo.id] === "loading"}
+                                onClick={() => handleQueueSync(repo)}
+                              >
+                                {syncActionStatusByRepo[repo.id] === "loading" ? "Retrying..." : "Retry sync"}
+                              </button>
+                            </div>
                           </div>
                         ) : null}
 
@@ -1233,7 +1383,15 @@ function App() {
                               disabled={syncActionStatusByRepo[repo.id] === "loading" || isSyncActive(latestSyncRunsByRepo[repo.id])}
                               onClick={() => handleQueueSync(repo)}
                             >
-                              {syncActionStatusByRepo[repo.id] === "loading" ? "Queueing..." : isSyncActive(latestSyncRunsByRepo[repo.id]) ? "Sync active" : "Queue sync"}
+                              {syncActionStatusByRepo[repo.id] === "loading"
+                                ? latestSyncRunsByRepo[repo.id]?.status === "failed"
+                                  ? "Retrying..."
+                                  : "Queueing..."
+                                : isSyncActive(latestSyncRunsByRepo[repo.id])
+                                  ? "Sync active"
+                                  : latestSyncRunsByRepo[repo.id]?.status === "failed"
+                                    ? "Retry sync"
+                                    : "Queue sync"}
                             </button>
                           </div>
                         </div>
@@ -1276,7 +1434,7 @@ function App() {
   );
 }
 
-function RepositoryDashboardPage({ dashboard, status, error, onBack, onOpenModules, onOpenHotspots, onOpenCoChange }) {
+function RepositoryDashboardPage({ dashboard, status, error, onBack, onRetrySync, onOpenModules, onOpenModule, onOpenHotspots, onOpenCoChange, onOpenContributors }) {
   if (status === "loading") {
     return (
       <section className="dashboard-shell">
@@ -1318,7 +1476,15 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack, onOpenModul
   const topContributors = dashboard.top_contributors || [];
   const highlights = getDashboardHighlights(repo, overview, latestSyncRun, topContributors, moduleBusFactor);
   const metrics = getDashboardMetrics(repo, overview, latestSyncRun, recentSyncRuns, topContributors);
-  const moduleSummary = getModuleSummary(moduleOwnership, moduleExpertise, moduleBusFactor);
+  const contributorSummary = getContributorSummary(topContributors, moduleOwnership, moduleExpertise);
+  const hotspotSummary = getHotspotSummary(hotspots);
+  const coChangeSummary = getCoChangeSummary(coChanges);
+  const topOwnerModules = moduleOwnership.slice(0, 3);
+  const highestRiskModule = moduleBusFactor.find((module) => module.risk === "high") || moduleBusFactor[0];
+  const syncHeroCard = {
+    title: latestSyncRun ? getSyncHealthTitle(latestSyncRun) : "No sync completed yet",
+    body: latestSyncRun ? getSyncHealthBody(latestSyncRun) : "Queue the first sync to populate commit, file, and contributor insights."
+  };
 
   return (
     <section className="dashboard-shell">
@@ -1342,8 +1508,8 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack, onOpenModul
           </div>
           <p className="dashboard-subtitle">{repo.full_name}</p>
           <p className="dashboard-description">
-            This is the first repository dashboard view for <strong>{repo.name}</strong>. It uses only the repository metadata,
-            sync history, and contributor data that CodeAtlas already stores safely today.
+            This is the first repository dashboard view for <strong>{repo.name}</strong>. It uses only the repository metadata, sync history,
+            contributor data, and derived analytics that CodeAtlas already stores safely today.
           </p>
         </div>
 
@@ -1364,47 +1530,28 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack, onOpenModul
       </section>
 
       <section className="dashboard-welcome">
-        <div>
-          <span className="eyebrow">Welcome summary</span>
-          <h2>{repo.name} at a glance</h2>
-          <p>
-            A safe first dashboard focused on what CodeAtlas knows for sure right now: sync health, mapped codebase size, and
-            contributor ownership signals.
-          </p>
+        <div className="dashboard-welcome-main">
+          <div>
+            <span className="eyebrow">Welcome summary</span>
+            <h2>At a glance</h2>
+            <p>What we can measure right now: sync health, mapped codebase size, and contributor ownership signals.</p>
+          </div>
+          <div className="dashboard-highlight-card dashboard-highlight-card-primary">
+            <span className="dashboard-highlight-eyebrow">Sync health</span>
+            <strong>{syncHeroCard.title}</strong>
+            <p>{syncHeroCard.body}</p>
+          </div>
         </div>
-        <div className="dashboard-highlight-list">
-          {highlights.map((highlight) => (
-            <div className="dashboard-highlight-card" key={highlight.title}>
-              <strong>{highlight.title}</strong>
+
+        <div className="dashboard-welcome-side">
+          {highlights.slice(1).map((highlight) => (
+            <div className="dashboard-highlight-card dashboard-highlight-card-secondary" key={highlight.title}>
+              <span className="dashboard-highlight-eyebrow">{highlight.title}</span>
               <p>{highlight.body}</p>
             </div>
           ))}
         </div>
       </section>
-
-      {latestSyncRun ? (
-        <section className={`dashboard-sync-health dashboard-sync-health-${latestSyncRun.status}`}>
-          <div>
-            <span className="eyebrow">Sync health</span>
-            <h2>{getSyncHealthTitle(latestSyncRun)}</h2>
-            <p>{getSyncHealthBody(latestSyncRun)}</p>
-          </div>
-          <div className="dashboard-sync-health-meta">
-            <div className="hero-meta-card">
-              <span>Latest state</span>
-              <strong>{formatSyncStatusForBadge(latestSyncRun.status)}</strong>
-            </div>
-            <div className="hero-meta-card">
-              <span>Last attempt</span>
-              <strong>{formatRelativeDate(latestSyncRun.completed_at || latestSyncRun.started_at || latestSyncRun.created_at)}</strong>
-            </div>
-            <div className="hero-meta-card">
-              <span>Duration</span>
-              <strong>{formatDuration(latestSyncRun.summary?.duration_ms)}</strong>
-            </div>
-          </div>
-        </section>
-      ) : null}
 
       <section className="dashboard-kpi-grid">
         {metrics.map((metric) => (
@@ -1422,7 +1569,7 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack, onOpenModul
             <div className="dashboard-panel-head">
               <div>
                 <h3>Repository overview</h3>
-                <p>Real metadata and sync signals that are safely available today.</p>
+                <p>Start here to understand scale, freshness, and sync coverage before diving into risk.</p>
               </div>
             </div>
             <div className="dashboard-overview-grid">
@@ -1456,25 +1603,109 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack, onOpenModul
           <section className="dashboard-panel">
             <div className="dashboard-panel-head">
               <div>
+                <h3>Top module owners</h3>
+                <p>The best starting point for understanding where responsibility and concentration sit.</p>
+              </div>
+              <button type="button" className="button button-secondary button-small" onClick={() => onOpenModules(repo.id)}>
+                View modules
+              </button>
+            </div>
+
+            {moduleOwnership.length === 0 ? (
+              <div className="dashboard-empty-panel">
+                <strong>No module ownership data yet</strong>
+                <p>Ownership distribution appears here after module analytics have been rebuilt.</p>
+              </div>
+            ) : (
+              <div className="dashboard-top-owner-list">
+                {topOwnerModules.map((module) => (
+                  <div className="dashboard-top-owner-row" key={module.module_id}>
+                    <div className="dashboard-top-owner-head">
+                      <div>
+                        <button type="button" className="repo-link-button" onClick={() => onOpenModule(repo.id, module.module_id)}>
+                          {module.module_name}
+                        </button>
+                        <p>{formatModulePath(module.path_prefix)}</p>
+                      </div>
+                      <div className="dashboard-module-badges">
+                        <span className={`dashboard-badge ${getRiskBadgeClass(module.risk)}`}>{formatRiskLabel(module.risk)}</span>
+                        <span className="dashboard-badge">{`Bus factor ${module.bus_factor || 0}`}</span>
+                      </div>
+                    </div>
+                    {module.owners[0] ? (
+                      <>
+                        <div className="dashboard-top-owner-metric">
+                          <span>{module.owners[0].username}</span>
+                          <strong>{formatPercent(module.owners[0].ownership_percent)}</strong>
+                        </div>
+                        <p className="dashboard-top-owner-copy">
+                          {formatCount(module.owners[0].commit_count)} commits, {formatCount(module.owners[0].files_touched_count)} files touched
+                        </p>
+                      </>
+                    ) : (
+                      <p className="dashboard-module-empty-copy">No ownership entries computed yet for this module.</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-head">
+              <div>
                 <h3>Hotspot files</h3>
-                <p>A compact summary of where file churn is currently concentrated.</p>
+                <p>After understanding ownership, this shows where code churn is actually concentrated.</p>
               </div>
               <button type="button" className="button button-secondary button-small" onClick={() => onOpenHotspots(repo.id)}>
                 View all hotspots
               </button>
             </div>
-
-            {hotspots.length === 0 ? (
+            {hotspotSummary.length === 0 ? (
               <div className="dashboard-empty-panel">
                 <strong>No hotspot data yet</strong>
                 <p>Hotspot analysis will appear here after commit history has been imported.</p>
               </div>
             ) : (
               <div className="dashboard-module-summary-grid">
-                {getHotspotSummary(hotspots).map((item) => (
-                  <div className="dashboard-module-summary-card" key={item.title}>
+                {hotspotSummary.map((item) => (
+                  <button type="button" className="dashboard-module-summary-card dashboard-module-summary-card-button" key={item.title} onClick={() => onOpenHotspots(repo.id, item.path || "")}>
                     <span className="dashboard-module-summary-label">{item.title}</span>
-                    <strong>{item.primary}</strong>
+                    <strong className="dashboard-summary-primary" title={item.primary}>
+                      {truncateMiddle(item.primary, 56)}
+                    </strong>
+                    <p>{item.secondary}</p>
+                    {item.meta ? <span className="dashboard-inline-chip">{item.meta}</span> : null}
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <h3>Files that move together</h3>
+                <p>Use this after hotspots to understand which files or areas may be tightly coupled.</p>
+              </div>
+              <button type="button" className="button button-secondary button-small" onClick={() => onOpenCoChange(repo.id)}>
+                View all pairs
+              </button>
+            </div>
+
+            {coChangeSummary.length === 0 ? (
+              <div className="dashboard-empty-panel">
+                <strong>No co-change data yet</strong>
+                <p>Once synced commit history is available, CodeAtlas will surface files that frequently change together.</p>
+              </div>
+            ) : (
+              <div className="dashboard-module-summary-grid">
+                {coChangeSummary.map((item) => (
+                  <div className="dashboard-module-summary-card dashboard-module-summary-card-tinted" key={item.title}>
+                    <span className="dashboard-module-summary-label">{item.title}</span>
+                    <strong className="dashboard-summary-primary" title={item.primary}>
+                      {item.primary_display || truncateMiddle(item.primary, 56)}
+                    </strong>
                     <p>{item.secondary}</p>
                     {item.meta ? <span className="dashboard-inline-chip">{item.meta}</span> : null}
                   </div>
@@ -1486,31 +1717,95 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack, onOpenModul
           <section className="dashboard-panel">
             <div className="dashboard-panel-head">
               <div>
-                <h3>Files that move together</h3>
-                <p>Early co-change signals from commit history, useful for spotting coupling and hidden dependencies.</p>
+                <h3>Contributor ownership view</h3>
+                <p>People context comes last, once you already know the risky areas and likely dependency clusters.</p>
               </div>
-              <button type="button" className="button button-secondary button-small" onClick={() => onOpenCoChange(repo.id)}>
-                View all pairs
+              <button type="button" className="button button-secondary button-small" onClick={() => onOpenContributors(repo.id)}>
+                View contributors
               </button>
             </div>
 
-            {coChanges.length === 0 ? (
+            {contributorSummary.length === 0 ? (
               <div className="dashboard-empty-panel">
-                <strong>No co-change data yet</strong>
-                <p>Once synced commit history is available, CodeAtlas will surface files that frequently change together.</p>
+                <strong>No contributor summary yet</strong>
+                <p>Run a sync to surface contributor ownership and reviewer signals here.</p>
               </div>
             ) : (
               <div className="dashboard-module-summary-grid">
-                {getCoChangeSummary(coChanges).map((item) => (
+                {contributorSummary.map((item) => (
                   <div className="dashboard-module-summary-card" key={item.title}>
                     <span className="dashboard-module-summary-label">{item.title}</span>
-                    <strong>{item.primary}</strong>
+                    <strong className="dashboard-summary-primary" title={item.primary}>
+                      {truncateMiddle(item.primary, 56)}
+                    </strong>
                     <p>{item.secondary}</p>
                     {item.meta ? <span className="dashboard-inline-chip">{item.meta}</span> : null}
                   </div>
                 ))}
               </div>
             )}
+          </section>
+
+        </div>
+
+        <aside className="dashboard-side-column">
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <h3>Operational highlights</h3>
+                <p>Short, high-signal repo facts that help you decide where to go next.</p>
+              </div>
+            </div>
+            <div className="dashboard-aside-list">
+              <div className="aside-item">
+                <span>Last sync duration</span>
+                <strong>{formatDuration(overview.latest_sync_duration_ms || latestSyncRun?.summary?.duration_ms)}</strong>
+              </div>
+              <div className="aside-item">
+                <span>Files mapped</span>
+                <strong>{formatCount(overview.total_files || latestSyncRun?.summary?.files_count)}</strong>
+              </div>
+              <div className="aside-item">
+                <span>Modules mapped</span>
+                <strong>{formatCount(overview.total_modules || latestSyncRun?.summary?.modules_count)}</strong>
+              </div>
+              <div className="aside-item">
+                <span>Highest risk module</span>
+                <strong>{highestRiskModule?.module_name || "Not available"}</strong>
+                <p>
+                  {highestRiskModule
+                    ? `Bus factor ${highestRiskModule.bus_factor || 0} with top owner concentration at ${formatPercent(highestRiskModule.top_owner_percent)}.`
+                    : "Risk concentration appears here after module analytics are available."}
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <h3>Quick navigation</h3>
+                <p>Jump directly to the views you’re most likely to use during analysis.</p>
+              </div>
+            </div>
+            <div className="dashboard-quick-links">
+              <button type="button" className="dashboard-quick-link" onClick={() => onOpenModules(repo.id)}>
+                <strong>Modules</strong>
+                <p>Inspect ownership, risk, and reviewer depth by module.</p>
+              </button>
+              <button type="button" className="dashboard-quick-link" onClick={() => onOpenHotspots(repo.id)}>
+                <strong>Hotspots</strong>
+                <p>Go straight to the files with the highest churn.</p>
+              </button>
+              <button type="button" className="dashboard-quick-link" onClick={() => onOpenCoChange(repo.id)}>
+                <strong>Co-change</strong>
+                <p>See which files and modules frequently move together.</p>
+              </button>
+              <button type="button" className="dashboard-quick-link" onClick={() => onOpenContributors(repo.id)}>
+                <strong>Contributors</strong>
+                <p>Review ownership coverage and likely reviewer candidates.</p>
+              </button>
+            </div>
           </section>
 
           <section className="dashboard-panel">
@@ -1529,193 +1824,24 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack, onOpenModul
             ) : (
               <div className="dashboard-sync-list">
                 {recentSyncRuns.map((run) => (
-                  <div className="dashboard-sync-row" key={run.id}>
+                  <div className={`dashboard-sync-row ${run.status === "failed" ? "dashboard-sync-row-failed" : ""}`} key={run.id}>
                     <div>
-                      <strong>{formatSyncStatusForBadge(run.status)}</strong>
-                      <p>{formatSyncRunDetail(run)}</p>
+                      <strong>{run.status === "failed" ? getSyncFailureTitle(run) : formatSyncStatusForBadge(run.status)}</strong>
+                      <p>{run.status === "failed" ? getSyncFailureReason(run) : formatSyncRunDetail(run)}</p>
                     </div>
                     <div className="dashboard-sync-meta">
-                      <span>{formatRelativeDate(run.completed_at || run.started_at || run.created_at)}</span>
                       <code>{run.sync_type}</code>
+                      <span>{formatRelativeDate(run.completed_at || run.started_at || run.created_at)}</span>
+                      {run.status === "failed" ? (
+                        <button type="button" className="button button-secondary button-small" onClick={() => onRetrySync(repo)}>
+                          Retry sync
+                        </button>
+                      ) : null}
                     </div>
                   </div>
                 ))}
               </div>
             )}
-          </section>
-
-          <section className="dashboard-panel">
-            <div className="dashboard-panel-head">
-              <div>
-                <h3>Module intelligence</h3>
-                <p>A compact summary of ownership, expertise, and risk across the synced module map.</p>
-              </div>
-              <button type="button" className="button button-secondary button-small" onClick={() => onOpenModules(repo.id)}>
-                View all modules
-              </button>
-            </div>
-
-            {moduleSummary.length === 0 ? (
-              <div className="dashboard-empty-panel">
-                <strong>No module analytics yet</strong>
-                <p>Run a completed sync to compute ownership, expertise, and bus-factor summaries for modules.</p>
-              </div>
-            ) : (
-              <div className="dashboard-module-summary-grid">
-                {moduleSummary.map((item) => (
-                  <div className="dashboard-module-summary-card" key={item.title}>
-                    <span className="dashboard-module-summary-label">{item.title}</span>
-                    <strong>{item.primary}</strong>
-                    <p>{item.secondary}</p>
-                    {item.meta ? <span className={`dashboard-inline-chip ${item.metaClass || ""}`}>{item.meta}</span> : null}
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className="dashboard-panel">
-            <div className="dashboard-panel-head">
-              <div>
-                <h3>Top module owners</h3>
-                <p>The strongest ownership signals across the highest-priority modules.</p>
-              </div>
-            </div>
-
-            {moduleOwnership.length === 0 ? (
-              <div className="dashboard-empty-panel">
-                <strong>No module ownership data yet</strong>
-                <p>Ownership distribution appears here after module analytics have been rebuilt.</p>
-              </div>
-            ) : (
-              <div className="dashboard-module-list">
-                {moduleOwnership.slice(0, 3).map((module) => (
-                  <div className="dashboard-module-card" key={module.module_id}>
-                    <div className="dashboard-module-head">
-                      <div>
-                        <strong>{module.module_name}</strong>
-                        <p>{formatModulePath(module.path_prefix)}</p>
-                      </div>
-                      <div className="dashboard-module-badges">
-                        <span className={`dashboard-badge ${getRiskBadgeClass(module.risk)}`}>{formatRiskLabel(module.risk)}</span>
-                        <span className="dashboard-badge">{`Bus factor ${module.bus_factor || 0}`}</span>
-                      </div>
-                    </div>
-                    {module.owners.length === 0 ? (
-                      <p className="dashboard-module-empty-copy">No ownership entries computed yet for this module.</p>
-                    ) : (
-                      <div className="dashboard-module-owner-list">
-                        {module.owners.slice(0, 3).map((owner) => (
-                          <div className="dashboard-module-owner-row" key={`${module.module_id}-${owner.rank}-${owner.username}`}>
-                            <div>
-                              <strong>{owner.username}</strong>
-                              <p>
-                                {formatCount(owner.commit_count)} commits, {formatCount(owner.files_touched_count)} files touched
-                              </p>
-                            </div>
-                            <span className="dashboard-module-owner-percent">{formatPercent(owner.ownership_percent)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className="dashboard-panel">
-            <div className="dashboard-panel-head">
-              <div>
-                <h3>Contributors</h3>
-                <p>Top contributors from the most recent synced contributor data.</p>
-              </div>
-            </div>
-
-            {topContributors.length === 0 ? (
-              <div className="dashboard-empty-panel">
-                <strong>No contributor data yet</strong>
-                <p>Contributor ownership appears here after the repository completes its first sync.</p>
-              </div>
-            ) : (
-              <div className="dashboard-contributor-list">
-                {topContributors.map((contributor) => (
-                  <div className="dashboard-contributor-row" key={contributor.id}>
-                    <div className="dashboard-contributor-id">
-                      <div className="dashboard-contributor-avatar">
-                        {contributor.avatar_url ? <img src={contributor.avatar_url} alt={contributor.username} /> : contributor.username.slice(0, 1).toUpperCase()}
-                      </div>
-                      <div>
-                        <strong>{contributor.username}</strong>
-                        <p>{formatContributionLabel(contributor.contributions_count)}</p>
-                      </div>
-                    </div>
-                    <span className="dashboard-contributor-count">{contributor.contributions_count}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-        </div>
-
-        <aside className="dashboard-side-column">
-          <section className="dashboard-panel">
-            <div className="dashboard-panel-head">
-              <div>
-                <h3>Operational highlights</h3>
-                <p>High-value facts we can source safely right now.</p>
-              </div>
-            </div>
-            <div className="dashboard-aside-list">
-              <div className="aside-item">
-                <span>Last sync duration</span>
-                <strong>{formatDuration(overview.latest_sync_duration_ms || latestSyncRun?.summary?.duration_ms)}</strong>
-              </div>
-              <div className="aside-item">
-                <span>Files mapped</span>
-                <strong>{formatCount(overview.total_files || latestSyncRun?.summary?.files_count)}</strong>
-              </div>
-              <div className="aside-item">
-                <span>Modules mapped</span>
-                <strong>{formatCount(overview.total_modules || latestSyncRun?.summary?.modules_count)}</strong>
-              </div>
-              <div className="aside-item">
-                <span>Highest risk module</span>
-                <strong>{moduleSummary[0]?.title === "Bus factor risk" ? moduleSummary[0].primary : "Not available"}</strong>
-                <p>{moduleSummary[0]?.secondary || "Risk concentration appears here after module analytics are available."}</p>
-              </div>
-            </div>
-          </section>
-
-          <section className="dashboard-panel">
-            <div className="dashboard-panel-head">
-              <div>
-                <h3>Waiting on integrations</h3>
-                <p>Reserved space for approved future connections.</p>
-              </div>
-            </div>
-            <div className="dashboard-placeholder-list">
-              <div className="placeholder-item">
-                <strong>Environment</strong>
-                <p>Not connected yet</p>
-              </div>
-              <div className="placeholder-item">
-                <strong>Version / release</strong>
-                <p>Not tracked yet</p>
-              </div>
-              <div className="placeholder-item">
-                <strong>Open PRs</strong>
-                <p>Coming soon through safe GitHub sync</p>
-              </div>
-              <div className="placeholder-item">
-                <strong>Issues</strong>
-                <p>Coming soon through safe GitHub sync</p>
-              </div>
-              <div className="placeholder-item">
-                <strong>Deployments</strong>
-                <p>Unavailable until a safe deployment integration is approved</p>
-              </div>
-            </div>
           </section>
         </aside>
       </section>
@@ -1723,7 +1849,7 @@ function RepositoryDashboardPage({ dashboard, status, error, onBack, onOpenModul
   );
 }
 
-function RepositoryModulesPage({ dashboard, status, error, onBack }) {
+function RepositoryModulesPage({ dashboard, status, error, onBack, onOpenModule }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortBy, setSortBy] = useState("risk");
   const repo = dashboard?.repository;
@@ -1854,24 +1980,48 @@ function RepositoryModulesPage({ dashboard, status, error, onBack }) {
             <section className="dashboard-panel" key={module.module_id}>
               <div className="dashboard-panel-head">
                 <div>
-                  <h3>{module.module_name}</h3>
+                  <button type="button" className="repo-link-button" onClick={() => onOpenModule(module.module_id)}>
+                    {module.module_name}
+                  </button>
                   <p>{formatModulePath(module.path_prefix)}</p>
                 </div>
                 <div className="dashboard-module-badges">
                   <span className={`dashboard-badge ${getRiskBadgeClass(module.risk)}`}>{formatRiskLabel(module.risk)}</span>
                   <span className="dashboard-badge">{`Bus factor ${module.bus_factor || 0}`}</span>
                   <span className="dashboard-badge">{`${formatCount(module.active_contributors || 0)} contributors`}</span>
+                  <button type="button" className="button button-secondary button-small" onClick={() => onOpenModule(module.module_id)}>
+                    Open module
+                  </button>
+                </div>
+              </div>
+
+              <div className="dashboard-module-summary-strip">
+                <div className="overview-item">
+                  <span>Top owner</span>
+                  <strong>{module.owners[0]?.username || "Not available"}</strong>
+                </div>
+                <div className="overview-item">
+                  <span>Ownership concentration</span>
+                  <strong>{formatPercent(module.top_owner_percent)}</strong>
+                </div>
+                <div className="overview-item">
+                  <span>Best reviewer</span>
+                  <strong>{module.experts[0]?.username || "Not available"}</strong>
+                </div>
+                <div className="overview-item">
+                  <span>Expertise score</span>
+                  <strong>{module.experts[0]?.score ?? "Not available"}</strong>
                 </div>
               </div>
 
               <div className="dashboard-module-detail-grid">
                 <div className="dashboard-module-detail-column">
-                  <h4>Ownership</h4>
+                  <h4>Ownership preview</h4>
                   {module.owners.length === 0 ? (
                     <p className="dashboard-module-empty-copy">No ownership entries computed yet.</p>
                   ) : (
                     <div className="dashboard-module-owner-list">
-                      {module.owners.map((owner) => (
+                      {module.owners.slice(0, 3).map((owner) => (
                         <div className="dashboard-module-owner-row" key={`${module.module_id}-owner-${owner.rank}-${owner.username}`}>
                           <div>
                             <strong>{owner.username}</strong>
@@ -1882,17 +2032,20 @@ function RepositoryModulesPage({ dashboard, status, error, onBack }) {
                           <span className="dashboard-module-owner-percent">{formatPercent(owner.ownership_percent)}</span>
                         </div>
                       ))}
+                      {module.owners.length > 3 ? (
+                        <p className="dashboard-module-empty-copy">{`${formatCount(module.owners.length - 3)} more owners available in module detail.`}</p>
+                      ) : null}
                     </div>
                   )}
                 </div>
 
                 <div className="dashboard-module-detail-column">
-                  <h4>Expertise</h4>
+                  <h4>Expertise preview</h4>
                   {module.experts.length === 0 ? (
                     <p className="dashboard-module-empty-copy">No expertise entries computed yet.</p>
                   ) : (
                     <div className="dashboard-module-owner-list">
-                      {module.experts.map((expert) => (
+                      {module.experts.slice(0, 3).map((expert) => (
                         <div className="dashboard-module-owner-row" key={`${module.module_id}-expert-${expert.rank}-${expert.username}`}>
                           <div>
                             <strong>{expert.username}</strong>
@@ -1903,6 +2056,9 @@ function RepositoryModulesPage({ dashboard, status, error, onBack }) {
                           <span className="dashboard-module-owner-percent">{expert.score}</span>
                         </div>
                       ))}
+                      {module.experts.length > 3 ? (
+                        <p className="dashboard-module-empty-copy">{`${formatCount(module.experts.length - 3)} more reviewers available in module detail.`}</p>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -1915,10 +2071,259 @@ function RepositoryModulesPage({ dashboard, status, error, onBack }) {
   );
 }
 
-function RepositoryHotspotsPage({ dashboard, status, error, onBack }) {
-  const [searchQuery, setSearchQuery] = useState("");
+function RepositoryModuleDetailPage({ dashboard, status, error, onBack, onOpenModule }) {
+  const repo = dashboard?.repository;
+  const module = dashboard?.module_detail;
+
+  if (status === "loading") {
+    return (
+      <section className="dashboard-shell">
+        <div className="dashboard-empty-state">
+          <strong>Loading module detail…</strong>
+          <p>Fetching ownership, expertise, hotspots, and module coupling for this area.</p>
+        </div>
+      </section>
+    );
+  }
+
+  if (status === "failed") {
+    return (
+      <section className="dashboard-shell">
+        <div className="dashboard-empty-state">
+          <strong>Module detail unavailable</strong>
+          <p>{error || "We could not load this module right now."}</p>
+          <button type="button" className="button button-secondary button-small" onClick={onBack}>
+            Back to modules
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (!dashboard || !module) {
+    return null;
+  }
+
+  const owners = module.owners || [];
+  const experts = module.experts || [];
+  const topOwner = owners[0] || null;
+  const topExpert = experts[0] || null;
+  const hotspots = module.hotspots || [];
+  const coChangePartners = module.cochange_partners || [];
+  const moduleRiskSummary = getModuleRiskSummary(module, topOwner, topExpert, hotspots, coChangePartners);
+
+  return (
+    <section className="dashboard-shell">
+      <section className="dashboard-subpage-hero">
+        <div>
+          <div className="dashboard-breadcrumb">
+            <button type="button" className="link-button" onClick={onBack}>
+              {repo.name}
+            </button>
+            <span>/</span>
+            <span>Modules</span>
+            <span>/</span>
+            <span>{module.module_name}</span>
+          </div>
+          <h1>{module.module_name}</h1>
+          <p>
+            Deep module detail for <strong>{repo.full_name}</strong>, focused on ownership, review expertise, hotspots, and linked modules.
+          </p>
+        </div>
+      </section>
+
+      <section className="dashboard-kpi-grid">
+        <div className="dashboard-kpi-card">
+          <span>Path</span>
+          <strong title={formatModulePath(module.path_prefix)}>{truncateMiddle(formatModulePath(module.path_prefix), 36)}</strong>
+          <p>Derived from synced repository file layout</p>
+        </div>
+        <div className="dashboard-kpi-card">
+          <span>Risk</span>
+          <strong>{formatRiskLabel(module.risk)}</strong>
+          <p>{`Bus factor ${module.bus_factor || 0} across ${formatCount(module.active_contributors || 0)} contributors`}</p>
+        </div>
+        <div className="dashboard-kpi-card">
+          <span>Top owner</span>
+          <strong>{topOwner?.username || "Not available"}</strong>
+          <p>{topOwner ? `${formatPercent(topOwner.ownership_percent)} ownership concentration` : "Ownership will appear after analytics are rebuilt"}</p>
+        </div>
+        <div className="dashboard-kpi-card">
+          <span>Best reviewer</span>
+          <strong>{topExpert?.username || "Not available"}</strong>
+          <p>{topExpert ? `Expertise score ${topExpert.score}` : "Expertise will appear after analytics are rebuilt"}</p>
+        </div>
+        <div className="dashboard-kpi-card">
+          <span>Hotspot files</span>
+          <strong>{formatCount(hotspots.length)}</strong>
+          <p>Top file churn signals inside this module</p>
+        </div>
+        <div className="dashboard-kpi-card">
+          <span>Linked modules</span>
+          <strong>{formatCount(coChangePartners.length)}</strong>
+          <p>Module-level coupling partners from co-change data</p>
+        </div>
+      </section>
+
+      <section className="dashboard-panel">
+        <div className="dashboard-panel-head">
+          <div>
+            <h3>Why this module stands out</h3>
+            <p>A quick read on ownership concentration, reviewer depth, churn, and dependency signals.</p>
+          </div>
+        </div>
+
+        <div className="dashboard-module-summary-grid">
+          {moduleRiskSummary.map((item) => (
+            <div className="dashboard-module-summary-card" key={item.title}>
+              <span className="dashboard-module-summary-label">{item.title}</span>
+              <strong className="dashboard-summary-primary">{item.primary}</strong>
+              <p>{item.secondary}</p>
+              {item.meta ? <span className="dashboard-inline-chip">{item.meta}</span> : null}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="dashboard-module-detail-list">
+        <section className="dashboard-panel">
+          <div className="dashboard-panel-head">
+            <div>
+              <h3>Ownership</h3>
+              <p>The strongest ownership signals inside this module.</p>
+            </div>
+          </div>
+
+          {owners.length === 0 ? (
+            <div className="dashboard-empty-panel">
+              <strong>No ownership entries yet</strong>
+              <p>Run and complete sync plus analytics rebuild to populate ownership distribution.</p>
+            </div>
+          ) : (
+            <div className="dashboard-module-owner-list">
+              {owners.map((owner) => (
+                <div className="dashboard-module-owner-row" key={`${module.module_id}-owner-${owner.rank}-${owner.username}`}>
+                  <div>
+                    <strong>{owner.username}</strong>
+                    <p>
+                      {formatCount(owner.commit_count)} commits, {formatCount(owner.files_touched_count)} files touched, {formatCount(owner.changes_count)} changes
+                    </p>
+                  </div>
+                  <span className="dashboard-module-owner-percent">{formatPercent(owner.ownership_percent)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="dashboard-panel">
+          <div className="dashboard-panel-head">
+            <div>
+              <h3>Expertise</h3>
+              <p>People who look like the best current reviewers for this module.</p>
+            </div>
+          </div>
+
+          {experts.length === 0 ? (
+            <div className="dashboard-empty-panel">
+              <strong>No expertise entries yet</strong>
+              <p>Review depth appears here after module expertise is computed.</p>
+            </div>
+          ) : (
+            <div className="dashboard-module-owner-list">
+              {experts.map((expert) => (
+                <div className="dashboard-module-owner-row" key={`${module.module_id}-expert-${expert.rank}-${expert.username}`}>
+                  <div>
+                    <strong>{expert.username}</strong>
+                    <p>
+                      Score {expert.score}, {formatCount(expert.commit_count)} commits, {formatCount(expert.recent_commit_count)} recent commits
+                    </p>
+                  </div>
+                  <span className="dashboard-module-owner-percent">{expert.score}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="dashboard-panel">
+          <div className="dashboard-panel-head">
+            <div>
+              <h3>Hotspot files in this module</h3>
+              <p>File churn signals limited to this module only.</p>
+            </div>
+          </div>
+
+          {hotspots.length === 0 ? (
+            <div className="dashboard-empty-panel">
+              <strong>No module hotspot files yet</strong>
+              <p>This section fills after commit history has been imported for files in this module.</p>
+            </div>
+          ) : (
+            <div className="dashboard-module-owner-list">
+              {hotspots.map((hotspot) => (
+                <div className="dashboard-module-owner-row" key={`${module.module_id}-hotspot-${hotspot.path}`}>
+                  <div>
+                    <strong title={hotspot.path}>{truncateMiddle(hotspot.path, 72)}</strong>
+                    <p>
+                      {formatCount(hotspot.commit_count)} commits, {formatCount(hotspot.lines_added)} added, {formatCount(hotspot.lines_deleted)} deleted
+                    </p>
+                  </div>
+                  <span className="dashboard-module-owner-percent">{formatCount(hotspot.churn)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="dashboard-panel">
+          <div className="dashboard-panel-head">
+            <div>
+              <h3>Linked modules</h3>
+              <p>Other modules that frequently change with this one.</p>
+            </div>
+          </div>
+
+          {coChangePartners.length === 0 ? (
+            <div className="dashboard-empty-panel">
+              <strong>No linked modules yet</strong>
+              <p>Module-level coupling appears here once enough co-change data is available.</p>
+            </div>
+          ) : (
+            <div className="dashboard-module-owner-list">
+              {coChangePartners.map((partner) => (
+                <button
+                  type="button"
+                  className="dashboard-module-owner-row dashboard-module-owner-row-clickable"
+                  key={`${module.module_id}-partner-${partner.module_id}`}
+                  onClick={() => onOpenModule(partner.module_id)}
+                >
+                  <div>
+                    <strong>{partner.module_name}</strong>
+                    <p>
+                      {formatModulePath(partner.path_prefix)}
+                      {partner.last_cochanged_at ? `, seen ${formatRelativeDate(partner.last_cochanged_at)}` : ""}
+                    </p>
+                  </div>
+                  <span className="dashboard-module-owner-percent">{formatCount(partner.cochange_count)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
+      </section>
+    </section>
+  );
+}
+
+function RepositoryHotspotsPage({ dashboard, status, error, initialSearch, onBack }) {
+  const [searchQuery, setSearchQuery] = useState(initialSearch || "");
   const [sortBy, setSortBy] = useState("churn");
   const repo = dashboard?.repository;
+
+  useEffect(() => {
+    setSearchQuery(initialSearch || "");
+  }, [initialSearch]);
   const hotspots = useMemo(() => {
     const items = dashboard?.hotspots || [];
     const query = searchQuery.trim().toLowerCase();
@@ -2049,6 +2454,239 @@ function RepositoryHotspotsPage({ dashboard, status, error, onBack }) {
                 <div className="overview-item">
                   <span>Total churn</span>
                   <strong>{formatCount(hotspot.churn)}</strong>
+                </div>
+              </div>
+            </section>
+          ))}
+        </section>
+      )}
+    </section>
+  );
+}
+
+function RepositoryContributorsPage({ dashboard, status, error, onBack }) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortBy, setSortBy] = useState("contributions");
+  const repo = dashboard?.repository;
+  const contributors = dashboard?.contributors || dashboard?.top_contributors || [];
+  const moduleOwnership = dashboard?.module_ownership || [];
+  const moduleExpertise = dashboard?.module_expertise || [];
+
+  const contributorRows = useMemo(() => {
+    const rows = contributors.map((contributor) => {
+      const ownedModules = moduleOwnership
+        .filter((module) => (module.owners || []).some((owner) => owner.username === contributor.username))
+        .map((module) => ({
+          module_name: module.module_name,
+          ownership: (module.owners || []).find((owner) => owner.username === contributor.username)
+        }));
+
+      const expertModules = moduleExpertise
+        .filter((module) => (module.experts || []).some((expert) => expert.username === contributor.username))
+        .map((module) => ({
+          module_name: module.module_name,
+          expert: (module.experts || []).find((expert) => expert.username === contributor.username)
+        }));
+
+      const strongestOwnership = ownedModules.reduce((best, item) => Math.max(best, item.ownership?.ownership_percent || 0), 0);
+      const bestExpertise = expertModules.reduce((best, item) => Math.max(best, item.expert?.score || 0), 0);
+
+      return {
+        ...contributor,
+        owned_modules: ownedModules,
+        expert_modules: expertModules,
+        strongest_ownership_percent: strongestOwnership,
+        best_expertise_score: bestExpertise
+      };
+    });
+
+    const query = searchQuery.trim().toLowerCase();
+    const filteredRows = !query
+      ? rows
+      : rows.filter((contributor) => {
+          const ownedModuleNames = contributor.owned_modules.map((item) => item.module_name).join(" ").toLowerCase();
+          const expertModuleNames = contributor.expert_modules.map((item) => item.module_name).join(" ").toLowerCase();
+          return contributor.username.toLowerCase().includes(query) || ownedModuleNames.includes(query) || expertModuleNames.includes(query);
+        });
+
+    return filteredRows.sort((left, right) => {
+      if (sortBy === "ownership") {
+        if (right.strongest_ownership_percent !== left.strongest_ownership_percent) {
+          return right.strongest_ownership_percent - left.strongest_ownership_percent;
+        }
+      } else if (sortBy === "expertise") {
+        if (right.best_expertise_score !== left.best_expertise_score) {
+          return right.best_expertise_score - left.best_expertise_score;
+        }
+      } else if (sortBy === "modules") {
+        const leftCoverage = left.owned_modules.length + left.expert_modules.length;
+        const rightCoverage = right.owned_modules.length + right.expert_modules.length;
+        if (rightCoverage !== leftCoverage) {
+          return rightCoverage - leftCoverage;
+        }
+      } else if (right.contributions_count !== left.contributions_count) {
+        return right.contributions_count - left.contributions_count;
+      }
+
+      return left.username.localeCompare(right.username);
+    });
+  }, [contributors, moduleOwnership, moduleExpertise, searchQuery, sortBy]);
+
+  if (status === "loading") {
+    return (
+      <section className="dashboard-shell">
+        <div className="dashboard-empty-state">
+          <strong>Loading contributors…</strong>
+          <p>Fetching contributor, ownership, and expertise details.</p>
+        </div>
+      </section>
+    );
+  }
+
+  if (status === "failed") {
+    return (
+      <section className="dashboard-shell">
+        <div className="dashboard-empty-state">
+          <strong>Contributor view unavailable</strong>
+          <p>{error || "We could not load contributor analytics right now."}</p>
+          <button type="button" className="button button-secondary button-small" onClick={onBack}>
+            Back to dashboard
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (!dashboard) {
+    return null;
+  }
+
+  return (
+    <section className="dashboard-shell">
+      <section className="dashboard-subpage-hero">
+        <div>
+          <div className="dashboard-breadcrumb">
+            <button type="button" className="link-button" onClick={onBack}>
+              {repo.name}
+            </button>
+            <span>/</span>
+            <span>Contributors</span>
+          </div>
+          <h1>Contributor view</h1>
+          <p>
+            People-focused insight for <strong>{repo.full_name}</strong>, using synced contributor activity plus module ownership and expertise.
+          </p>
+        </div>
+      </section>
+
+      <section className="dashboard-toolbar">
+        <label className="dashboard-search-field">
+          <span>Search contributors or modules</span>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search by contributor or module"
+          />
+        </label>
+
+        <label className="dashboard-select-field">
+          <span>Sort by</span>
+          <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
+            <option value="contributions">Most contributions</option>
+            <option value="ownership">Strongest ownership</option>
+            <option value="expertise">Highest expertise</option>
+            <option value="modules">Widest module coverage</option>
+          </select>
+        </label>
+      </section>
+
+      {contributorRows.length === 0 ? (
+        <section className="dashboard-panel">
+          <div className="dashboard-empty-panel">
+            <strong>{searchQuery ? "No contributors match this search" : "No contributor analytics yet"}</strong>
+            <p>{searchQuery ? "Try a different contributor or module name." : "Complete a repository sync to populate this view."}</p>
+          </div>
+        </section>
+      ) : (
+        <section className="dashboard-contributor-detail-list">
+          {contributorRows.map((contributor) => (
+            <section className="dashboard-panel" key={contributor.id}>
+              <div className="dashboard-panel-head">
+                <div className="dashboard-contributor-title">
+                  <div className="dashboard-contributor-avatar large">
+                    {contributor.avatar_url ? <img src={contributor.avatar_url} alt={contributor.username} /> : contributor.username.slice(0, 1).toUpperCase()}
+                  </div>
+                  <div>
+                    <h3>{contributor.username}</h3>
+                    <p>
+                      {formatContributionLabel(contributor.contributions_count)}
+                      {contributor.last_seen_at ? `, last active ${formatRelativeDate(contributor.last_seen_at)}` : ""}
+                    </p>
+                  </div>
+                </div>
+                <div className="dashboard-module-badges">
+                  <span className="dashboard-badge">{`${formatCount(contributor.owned_modules.length)} owned modules`}</span>
+                  <span className="dashboard-badge">{`${formatCount(contributor.expert_modules.length)} review areas`}</span>
+                </div>
+              </div>
+
+              <div className="dashboard-module-summary-strip">
+                <div className="overview-item">
+                  <span>Strongest ownership</span>
+                  <strong>{formatPercent(contributor.strongest_ownership_percent)}</strong>
+                </div>
+                <div className="overview-item">
+                  <span>Best expertise score</span>
+                  <strong>{contributor.best_expertise_score || "Not available"}</strong>
+                </div>
+                <div className="overview-item">
+                  <span>Owned modules</span>
+                  <strong>{formatCount(contributor.owned_modules.length)}</strong>
+                </div>
+                <div className="overview-item">
+                  <span>Review coverage</span>
+                  <strong>{formatCount(contributor.expert_modules.length)}</strong>
+                </div>
+              </div>
+
+              <div className="dashboard-module-detail-grid">
+                <div className="dashboard-module-detail-column">
+                  <h4>Ownership signals</h4>
+                  {contributor.owned_modules.length === 0 ? (
+                    <p className="dashboard-module-empty-copy">No ownership entries for this contributor yet.</p>
+                  ) : (
+                    <div className="dashboard-module-owner-list">
+                      {contributor.owned_modules.slice(0, 5).map((item) => (
+                        <div className="dashboard-module-owner-row" key={`${contributor.username}-${item.module_name}-owner`}>
+                          <div>
+                            <strong>{item.module_name}</strong>
+                            <p>{formatCount(item.ownership?.commit_count || 0)} commits attributed in this module</p>
+                          </div>
+                          <span className="dashboard-module-owner-percent">{formatPercent(item.ownership?.ownership_percent || 0)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="dashboard-module-detail-column">
+                  <h4>Best review areas</h4>
+                  {contributor.expert_modules.length === 0 ? (
+                    <p className="dashboard-module-empty-copy">No expertise entries for this contributor yet.</p>
+                  ) : (
+                    <div className="dashboard-module-owner-list">
+                      {contributor.expert_modules.slice(0, 5).map((item) => (
+                        <div className="dashboard-module-owner-row" key={`${contributor.username}-${item.module_name}-expert`}>
+                          <div>
+                            <strong>{item.module_name}</strong>
+                            <p>{formatCount(item.expert?.recent_commit_count || 0)} recent commits contributing to expertise</p>
+                          </div>
+                          <span className="dashboard-module-owner-percent">{item.expert?.score || 0}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             </section>
@@ -2495,7 +3133,7 @@ function getSyncHealthBody(syncRun) {
   }
 
   if (syncRun.status === "failed") {
-    return syncRun.error_message || "The latest sync failed before the repository snapshot could finish importing.";
+    return getSyncFailureReason(syncRun);
   }
 
   if (syncRun.status === "running") {
@@ -2511,7 +3149,18 @@ function getSyncHealthBody(syncRun) {
 
 function getCurrentRoute() {
   const pathname = window.location.pathname || "/";
-  const match = pathname.match(/^\/repos\/(\d+)(?:\/(dashboard|modules|hotspots|co-change))?\/?$/);
+  const searchParams = new URLSearchParams(window.location.search || "");
+  const moduleMatch = pathname.match(/^\/repos\/(\d+)\/modules\/(\d+)\/?$/);
+  if (moduleMatch) {
+    return {
+      view: "module",
+      repositoryId: moduleMatch[1],
+      moduleId: moduleMatch[2],
+      hotspotPath: ""
+    };
+  }
+
+  const match = pathname.match(/^\/repos\/(\d+)(?:\/(dashboard|modules|hotspots|co-change|contributors))?\/?$/);
   if (match) {
     return {
       view:
@@ -2521,14 +3170,20 @@ function getCurrentRoute() {
             ? "hotspots"
             : match[2] === "co-change"
               ? "cochange"
-              : "dashboard",
-      repositoryId: match[1]
+              : match[2] === "contributors"
+                ? "contributors"
+                : "dashboard",
+      repositoryId: match[1],
+      moduleId: "",
+      hotspotPath: match[2] === "hotspots" ? searchParams.get("path") || "" : ""
     };
   }
 
   return {
     view: "onboarding",
-    repositoryId: ""
+    repositoryId: "",
+    moduleId: "",
+    hotspotPath: ""
   };
 }
 
@@ -2648,6 +3303,7 @@ function getHotspotSummary(hotspots) {
     cards.push({
       title: "Highest churn file",
       primary: highestChurn.path,
+      path: highestChurn.path,
       secondary: `${formatCount(highestChurn.churn)} total churn across ${formatCount(highestChurn.commit_count)} commits.`,
       meta: "Most volatile"
     });
@@ -2657,6 +3313,7 @@ function getHotspotSummary(hotspots) {
     cards.push({
       title: "Most touched file",
       primary: mostTouched.path,
+      path: mostTouched.path,
       secondary: `${formatCount(mostTouched.commit_count)} commit touches with ${formatCount(mostTouched.lines_deleted)} deleted lines.`,
       meta: "Most revisited"
     });
@@ -2666,6 +3323,7 @@ function getHotspotSummary(hotspots) {
     cards.push({
       title: "Largest additions",
       primary: largestAddition.path,
+      path: largestAddition.path,
       secondary: `${formatCount(largestAddition.lines_added)} lines added and ${formatCount(largestAddition.lines_deleted)} lines deleted.`,
       meta: "Highest growth"
     });
@@ -2690,6 +3348,7 @@ function getCoChangeSummary(coChanges) {
     cards.push({
       title: "Strongest pair",
       primary: `${strongestPair.left_path} ↔ ${strongestPair.right_path}`,
+      primary_display: formatCoChangePairLabel(strongestPair.left_path, strongestPair.right_path),
       secondary: `${formatCount(strongestPair.cochange_count)} shared commits in the current sync dataset.`,
       meta: "Highest overlap"
     });
@@ -2699,6 +3358,7 @@ function getCoChangeSummary(coChanges) {
     cards.push({
       title: "Most recently linked",
       primary: `${mostRecentPair.left_path} ↔ ${mostRecentPair.right_path}`,
+      primary_display: formatCoChangePairLabel(mostRecentPair.left_path, mostRecentPair.right_path),
       secondary: `Seen together ${formatRelativeDate(mostRecentPair.last_cochanged_at)}.`,
       meta: "Fresh signal"
     });
@@ -2708,12 +3368,128 @@ function getCoChangeSummary(coChanges) {
     cards.push({
       title: "Another likely dependency",
       primary: `${broadestPair.left_path} ↔ ${broadestPair.right_path}`,
+      primary_display: formatCoChangePairLabel(broadestPair.left_path, broadestPair.right_path),
       secondary: `${formatCount(broadestPair.cochange_count)} shared commits recorded so far.`,
       meta: "Investigate"
     });
   }
 
   return cards.slice(0, 3);
+}
+
+function getModuleCoChangeSummary(moduleCoChanges) {
+  const strongestPair = moduleCoChanges[0];
+  const mostRecentPair = [...moduleCoChanges]
+    .filter((pair) => Boolean(pair.last_cochanged_at))
+    .sort((left, right) => new Date(right.last_cochanged_at).getTime() - new Date(left.last_cochanged_at).getTime())[0];
+  const cards = [];
+
+  if (strongestPair) {
+    cards.push({
+      title: "Strongest module pair",
+      primary: `${strongestPair.left_module_name} ↔ ${strongestPair.right_module_name}`,
+      secondary: `${formatCount(strongestPair.cochange_count)} shared commits across the synced history.`,
+      meta: "Highest coupling"
+    });
+  }
+
+  if (mostRecentPair) {
+    cards.push({
+      title: "Most recently coupled",
+      primary: `${mostRecentPair.left_module_name} ↔ ${mostRecentPair.right_module_name}`,
+      secondary: `Seen together ${formatRelativeDate(mostRecentPair.last_cochanged_at)}.`,
+      meta: "Recent signal"
+    });
+  }
+
+  if (strongestPair) {
+    cards.push({
+      title: "Boundary to inspect",
+      primary: `${formatModulePath(strongestPair.left_path_prefix)} ↔ ${formatModulePath(strongestPair.right_path_prefix)}`,
+      secondary: "Frequent joint edits can signal hidden dependency boundaries or refactor candidates.",
+      meta: "Investigate"
+    });
+  }
+
+  return cards.slice(0, 3);
+}
+
+function getContributorSummary(topContributors, moduleOwnership, moduleExpertise) {
+  const topContributor = topContributors[0];
+  const strongestOwnershipModule = moduleOwnership.find((module) => module.owners && module.owners.length > 0);
+  const strongestExpertiseModule = moduleExpertise.find((module) => module.experts && module.experts.length > 0);
+  const cards = [];
+
+  if (topContributor) {
+    cards.push({
+      title: "Most active contributor",
+      primary: topContributor.username,
+      secondary: `${formatContributionLabel(topContributor.contributions_count)} are currently stored for this contributor.`,
+      meta: topContributor.last_seen_at ? `Active ${formatRelativeDate(topContributor.last_seen_at)}` : "Contributor activity"
+    });
+  }
+
+  if (strongestOwnershipModule?.owners?.[0]) {
+    cards.push({
+      title: "Strongest ownership signal",
+      primary: strongestOwnershipModule.owners[0].username,
+      secondary: `${strongestOwnershipModule.module_name} at ${formatPercent(strongestOwnershipModule.owners[0].ownership_percent)} ownership.`,
+      meta: strongestOwnershipModule.module_name
+    });
+  }
+
+  if (strongestExpertiseModule?.experts?.[0]) {
+    cards.push({
+      title: "Best current reviewer",
+      primary: strongestExpertiseModule.experts[0].username,
+      secondary: `${strongestExpertiseModule.module_name} with expertise score ${strongestExpertiseModule.experts[0].score}.`,
+      meta: strongestExpertiseModule.module_name
+    });
+  }
+
+  return cards.slice(0, 3);
+}
+
+function getModuleRiskSummary(module, topOwner, topExpert, hotspots, coChangePartners) {
+  const cards = [];
+
+  cards.push({
+    title: "Ownership concentration",
+    primary: topOwner ? `${topOwner.username} leads ownership` : "Ownership still forming",
+    secondary: topOwner
+      ? `${formatPercent(topOwner.ownership_percent)} of known ownership sits with the top owner, with bus factor ${module.bus_factor || 0}.`
+      : "No ownership distribution is available for this module yet.",
+    meta: formatRiskLabel(module.risk)
+  });
+
+  cards.push({
+    title: "Reviewer depth",
+    primary: topExpert ? `${topExpert.username} is the best current reviewer` : "Reviewer depth unavailable",
+    secondary: topExpert
+      ? `Expertise score ${topExpert.score} based on ${formatCount(topExpert.commit_count)} commits and ${formatCount(topExpert.recent_commit_count)} recent commits.`
+      : "Expertise scores will appear here after review coverage is computed.",
+    meta: topExpert ? "Review signal" : "No signal"
+  });
+
+  cards.push({
+    title: "Internal churn",
+    primary: hotspots[0] ? truncateMiddle(hotspots[0].path, 44) : "No hotspot files yet",
+    secondary: hotspots[0]
+      ? `${formatCount(hotspots[0].churn)} churn on the hottest file across ${formatCount(hotspots.length)} tracked file${hotspots.length === 1 ? "" : "s"} in this module snapshot.`
+      : "No file-level churn has been recorded for this module yet.",
+    meta: hotspots[0] ? "Hotspot signal" : "No hotspot signal"
+  });
+
+  cards.push({
+    title: "Dependency pressure",
+    primary: coChangePartners[0] ? `${coChangePartners[0].module_name} is the strongest linked module` : "No linked modules yet",
+    secondary: coChangePartners[0]
+      ? `${formatCount(coChangePartners[0].cochange_count)} shared commits with the closest module pair, across ${formatCount(coChangePartners.length)} linked module${coChangePartners.length === 1 ? "" : "s"}.`
+      : "Module-to-module coupling will show up here once enough co-change history is available.",
+    meta: coChangePartners[0] ? "Coupling signal" : "No coupling signal"
+  });
+
+  return cards;
 }
 
 function mergeModuleAnalytics(moduleOwnership, moduleExpertise, moduleBusFactor) {
@@ -2910,6 +3686,30 @@ function formatContributionLabel(count) {
   return `${formatCount(count)} contribution${count === 1 ? "" : "s"}`;
 }
 
+function truncateMiddle(value, maxLength = 56) {
+  if (!value) {
+    return "";
+  }
+
+  const normalized = String(value).replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  if (maxLength <= 5) {
+    return `${normalized.slice(0, Math.max(0, maxLength - 1))}\u2026`;
+  }
+
+  const visible = maxLength - 1;
+  const left = Math.ceil(visible / 2);
+  const right = Math.floor(visible / 2);
+  return `${normalized.slice(0, left)}\u2026${normalized.slice(normalized.length - right)}`;
+}
+
+function formatCoChangePairLabel(leftPath, rightPath, sideMaxLength = 26) {
+  return `${truncateMiddle(leftPath, sideMaxLength)} ↔ ${truncateMiddle(rightPath, sideMaxLength)}`;
+}
+
 function getSyncTimingSummary(syncRun) {
   if (syncRun.completed_at) {
     return `completed ${formatRelativeDate(syncRun.completed_at)}`;
@@ -2922,7 +3722,7 @@ function getSyncTimingSummary(syncRun) {
 
 function formatSyncRunDetail(syncRun) {
   if (syncRun.status === "failed" && syncRun.error_message) {
-    return syncRun.error_message;
+    return getSyncFailureReason(syncRun);
   }
 
   const summary = syncRun.summary || {};
@@ -2978,7 +3778,7 @@ function getSyncRunMeta(repo, syncRun) {
   }
 
   if (syncRun.status === "failed") {
-    return syncRun.error_message || "The last sync ended with an error.";
+    return getSyncFailureReason(syncRun);
   }
 
   if (syncRun.status === "succeeded") {
@@ -3012,6 +3812,56 @@ function getSyncRunMeta(repo, syncRun) {
     default:
       return "Repository is connected and waiting for its first sync.";
   }
+}
+
+function getSyncFailureTitle(syncRun) {
+  const message = (syncRun?.error_message || "").toLowerCase();
+
+  if (message.includes("rate limit")) {
+    return "GitHub rate limit reached";
+  }
+  if (message.includes("timed out or stopped before completion")) {
+    return "Sync worker timeout";
+  }
+  if (message.includes("server error")) {
+    return "GitHub server error";
+  }
+  if (message.includes("repository contributors") || message.includes("repository commits")) {
+    return "GitHub sync request failed";
+  }
+
+  return "Latest sync failed";
+}
+
+function getSyncFailureReason(syncRun) {
+  const rawMessage = String(syncRun?.error_message || "").trim();
+  const message = rawMessage.toLowerCase();
+
+  if (!rawMessage) {
+    return "The latest sync failed before the repository snapshot could finish importing.";
+  }
+
+  if (message.includes("timed out or stopped before completion")) {
+    return "The worker stopped or exceeded the sync timeout before completion. Retry the sync to continue importing this repository.";
+  }
+
+  if (message.includes("rate limit")) {
+    return rawMessage;
+  }
+
+  if (message.includes("server error")) {
+    return "GitHub returned a temporary server error while syncing this repository. Retrying the sync usually resolves it.";
+  }
+
+  if (message.includes("decode repository contributors response page") && message.includes("eof")) {
+    return "GitHub returned an incomplete contributors response. Retry the sync to fetch the repository data again.";
+  }
+
+  if (message.includes("request repository") || message.includes("list repository")) {
+    return rawMessage;
+  }
+
+  return rawMessage;
 }
 
 createRoot(document.getElementById("app")).render(<App />);
