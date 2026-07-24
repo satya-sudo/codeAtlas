@@ -55,3 +55,12 @@ func (g *GitHubApp) ListRepositoryCommits(ctx context.Context, installationID in
 
 	return commits, nil
 }
+
+func (g *GitHubApp) ListRepositoryCommitsInRange(ctx context.Context, installationID int64, owner string, repo string, beforeSHA string, afterSHA string) ([]sharedgithub.RepositoryCommit, error) {
+	commits, err := g.client.ListRepositoryCommitsInRange(ctx, installationID, owner, repo, beforeSHA, afterSHA)
+	if err != nil {
+		return nil, fmt.Errorf("list repository commits in range: %w", err)
+	}
+
+	return commits, nil
+}

@@ -20,15 +20,20 @@ const (
 )
 
 type SyncRun struct {
-	ID           int64       `json:"id"`
-	RepositoryID int64       `json:"repository_id"`
-	SyncType     string      `json:"sync_type"`
-	Status       string      `json:"status"`
-	ErrorMessage *string     `json:"error_message,omitempty"`
-	Summary      SyncSummary `json:"summary"`
-	StartedAt    *time.Time  `json:"started_at,omitempty"`
-	CompletedAt  *time.Time  `json:"completed_at,omitempty"`
-	CreatedAt    time.Time   `json:"created_at"`
+	ID                int64       `json:"id"`
+	RepositoryID      int64       `json:"repository_id"`
+	SyncType          string      `json:"sync_type"`
+	TriggerSource     string      `json:"trigger_source"`
+	TriggerDeliveryID *string     `json:"trigger_delivery_id,omitempty"`
+	TriggerRef        *string     `json:"trigger_ref,omitempty"`
+	BeforeSHA         *string     `json:"before_sha,omitempty"`
+	AfterSHA          *string     `json:"after_sha,omitempty"`
+	Status            string      `json:"status"`
+	ErrorMessage      *string     `json:"error_message,omitempty"`
+	Summary           SyncSummary `json:"summary"`
+	StartedAt         *time.Time  `json:"started_at,omitempty"`
+	CompletedAt       *time.Time  `json:"completed_at,omitempty"`
+	CreatedAt         time.Time   `json:"created_at"`
 }
 
 type SyncSummary struct {

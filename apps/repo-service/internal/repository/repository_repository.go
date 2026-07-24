@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"codeatlas/apps/repo-service/internal/repos"
@@ -328,6 +329,11 @@ func (r *RepositoryRepository) CreateSyncRunForRepository(ctx context.Context, u
 			id,
 			repository_id,
 			sync_type,
+			trigger_source,
+			trigger_delivery_id,
+			trigger_ref,
+			before_sha,
+			after_sha,
 			status,
 			error_message,
 			contributors_count,
@@ -346,6 +352,11 @@ func (r *RepositoryRepository) CreateSyncRunForRepository(ctx context.Context, u
 		&run.ID,
 		&run.RepositoryID,
 		&run.SyncType,
+		&run.TriggerSource,
+		&run.TriggerDeliveryID,
+		&run.TriggerRef,
+		&run.BeforeSHA,
+		&run.AfterSHA,
 		&run.Status,
 		&run.ErrorMessage,
 		&run.Summary.ContributorsCount,
@@ -412,6 +423,11 @@ func (r *RepositoryRepository) ListSyncRunsForRepository(ctx context.Context, us
 			sr.id,
 			sr.repository_id,
 			sr.sync_type,
+			sr.trigger_source,
+			sr.trigger_delivery_id,
+			sr.trigger_ref,
+			sr.before_sha,
+			sr.after_sha,
 			sr.status,
 			sr.error_message,
 			sr.contributors_count,
@@ -442,6 +458,11 @@ func (r *RepositoryRepository) ListSyncRunsForRepository(ctx context.Context, us
 			&run.ID,
 			&run.RepositoryID,
 			&run.SyncType,
+			&run.TriggerSource,
+			&run.TriggerDeliveryID,
+			&run.TriggerRef,
+			&run.BeforeSHA,
+			&run.AfterSHA,
 			&run.Status,
 			&run.ErrorMessage,
 			&run.Summary.ContributorsCount,
@@ -473,6 +494,11 @@ func (r *RepositoryRepository) ListLatestSyncStatusForUser(ctx context.Context, 
 				sr.id,
 				sr.repository_id,
 				sr.sync_type,
+				sr.trigger_source,
+				sr.trigger_delivery_id,
+				sr.trigger_ref,
+				sr.before_sha,
+				sr.after_sha,
 				sr.status,
 				sr.error_message,
 				sr.contributors_count,
@@ -507,6 +533,11 @@ func (r *RepositoryRepository) ListLatestSyncStatusForUser(ctx context.Context, 
 			lr.id,
 			lr.repository_id,
 			lr.sync_type,
+			lr.trigger_source,
+			lr.trigger_delivery_id,
+			lr.trigger_ref,
+			lr.before_sha,
+			lr.after_sha,
 			lr.status,
 			lr.error_message,
 			lr.contributors_count,
@@ -539,6 +570,11 @@ func (r *RepositoryRepository) ListLatestSyncStatusForUser(ctx context.Context, 
 		var latestSyncRunID *int64
 		var latestSyncRunRepositoryID *int64
 		var latestSyncRunSyncType *string
+		var latestSyncRunTriggerSource *string
+		var latestSyncRunTriggerDeliveryID *string
+		var latestSyncRunTriggerRef *string
+		var latestSyncRunBeforeSHA *string
+		var latestSyncRunAfterSHA *string
 		var latestSyncRunStatus *string
 		var latestSyncRunContributorsCount *int
 		var latestSyncRunCommitsCount *int
@@ -568,6 +604,11 @@ func (r *RepositoryRepository) ListLatestSyncStatusForUser(ctx context.Context, 
 			&latestSyncRunID,
 			&latestSyncRunRepositoryID,
 			&latestSyncRunSyncType,
+			&latestSyncRunTriggerSource,
+			&latestSyncRunTriggerDeliveryID,
+			&latestSyncRunTriggerRef,
+			&latestSyncRunBeforeSHA,
+			&latestSyncRunAfterSHA,
 			&latestSyncRunStatus,
 			&latestSyncRunErrorMessage,
 			&latestSyncRunContributorsCount,
@@ -585,14 +626,19 @@ func (r *RepositoryRepository) ListLatestSyncStatusForUser(ctx context.Context, 
 
 		if latestSyncRunID != nil && latestSyncRunRepositoryID != nil && latestSyncRunSyncType != nil && latestSyncRunStatus != nil && latestSyncRunCreatedAt != nil {
 			run := repos.SyncRun{
-				ID:           *latestSyncRunID,
-				RepositoryID: *latestSyncRunRepositoryID,
-				SyncType:     *latestSyncRunSyncType,
-				Status:       *latestSyncRunStatus,
-				ErrorMessage: latestSyncRunErrorMessage,
-				StartedAt:    latestSyncRunStartedAt,
-				CompletedAt:  latestSyncRunCompletedAt,
-				CreatedAt:    *latestSyncRunCreatedAt,
+				ID:                *latestSyncRunID,
+				RepositoryID:      *latestSyncRunRepositoryID,
+				SyncType:          *latestSyncRunSyncType,
+				TriggerSource:     valueOrDefault(latestSyncRunTriggerSource, "manual"),
+				TriggerDeliveryID: latestSyncRunTriggerDeliveryID,
+				TriggerRef:        latestSyncRunTriggerRef,
+				BeforeSHA:         latestSyncRunBeforeSHA,
+				AfterSHA:          latestSyncRunAfterSHA,
+				Status:            *latestSyncRunStatus,
+				ErrorMessage:      latestSyncRunErrorMessage,
+				StartedAt:         latestSyncRunStartedAt,
+				CompletedAt:       latestSyncRunCompletedAt,
+				CreatedAt:         *latestSyncRunCreatedAt,
 			}
 			if latestSyncRunContributorsCount != nil {
 				run.Summary.ContributorsCount = *latestSyncRunContributorsCount
@@ -629,6 +675,11 @@ func (r *RepositoryRepository) FindSyncRunForRepository(ctx context.Context, use
 			sr.id,
 			sr.repository_id,
 			sr.sync_type,
+			sr.trigger_source,
+			sr.trigger_delivery_id,
+			sr.trigger_ref,
+			sr.before_sha,
+			sr.after_sha,
 			sr.status,
 			sr.error_message,
 			sr.contributors_count,
@@ -650,6 +701,11 @@ func (r *RepositoryRepository) FindSyncRunForRepository(ctx context.Context, use
 		&run.ID,
 		&run.RepositoryID,
 		&run.SyncType,
+		&run.TriggerSource,
+		&run.TriggerDeliveryID,
+		&run.TriggerRef,
+		&run.BeforeSHA,
+		&run.AfterSHA,
 		&run.Status,
 		&run.ErrorMessage,
 		&run.Summary.ContributorsCount,
@@ -1271,6 +1327,11 @@ func (r *RepositoryRepository) findActiveSyncRunForRepository(ctx context.Contex
 			sr.id,
 			sr.repository_id,
 			sr.sync_type,
+			sr.trigger_source,
+			sr.trigger_delivery_id,
+			sr.trigger_ref,
+			sr.before_sha,
+			sr.after_sha,
 			sr.status,
 			sr.error_message,
 			sr.contributors_count,
@@ -1296,6 +1357,11 @@ func (r *RepositoryRepository) findActiveSyncRunForRepository(ctx context.Contex
 		&run.ID,
 		&run.RepositoryID,
 		&run.SyncType,
+		&run.TriggerSource,
+		&run.TriggerDeliveryID,
+		&run.TriggerRef,
+		&run.BeforeSHA,
+		&run.AfterSHA,
 		&run.Status,
 		&run.ErrorMessage,
 		&run.Summary.ContributorsCount,
@@ -1378,4 +1444,17 @@ func repositoryMetadataChanged(existing repos.Repository, input repos.ConnectRep
 	}
 
 	return *existing.InstallationID != *input.InstallationID
+}
+
+func valueOrDefault(value *string, fallback string) string {
+	if value == nil {
+		return fallback
+	}
+
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return fallback
+	}
+
+	return trimmed
 }

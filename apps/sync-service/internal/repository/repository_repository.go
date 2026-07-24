@@ -28,6 +28,40 @@ type Repository struct {
 	InstallationID *int64
 }
 
+type SyncRun struct {
+	ID                int64
+	RepositoryID      int64
+	SyncType          string
+	TriggerSource     string
+	TriggerDeliveryID *string
+	TriggerRef        *string
+	BeforeSHA         *string
+	AfterSHA          *string
+	Status            string
+	CreatedAt         time.Time
+}
+
+type SyncRunTrigger struct {
+	Source     string
+	DeliveryID *string
+	Ref        *string
+	BeforeSHA  *string
+	AfterSHA   *string
+}
+
+type SyncRunRequestStatus string
+
+const (
+	SyncRunRequestStatusQueued         SyncRunRequestStatus = "queued"
+	SyncRunRequestStatusAlreadyQueued  SyncRunRequestStatus = "already_queued"
+	SyncRunRequestStatusAlreadyRunning SyncRunRequestStatus = "already_running"
+)
+
+type SyncRunRequestResult struct {
+	SyncRun       SyncRun
+	RequestStatus SyncRunRequestStatus
+}
+
 type RepositoryRepository struct {
 	db *pgxpool.Pool
 }
@@ -77,6 +111,160 @@ func (r *RepositoryRepository) FindRepositoryForSync(ctx context.Context, reposi
 	return repo, nil
 }
 
+func (r *RepositoryRepository) FindRepositoryForGitHubPush(ctx context.Context, githubRepoID int64, installationID *int64) (Repository, error) {
+	const query = `
+		SELECT id, github_repo_id, owner, name, installation_id
+		FROM repositories
+		WHERE github_repo_id = $1
+		  AND ($2::bigint IS NULL OR installation_id = $2)
+		LIMIT 1
+	`
+
+	var repo Repository
+	err := r.db.QueryRow(ctx, query, githubRepoID, installationID).Scan(
+		&repo.ID,
+		&repo.GitHubRepoID,
+		&repo.Owner,
+		&repo.Name,
+		&repo.InstallationID,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Repository{}, ErrRepositoryNotFound
+		}
+		return Repository{}, fmt.Errorf("find repository for github push: %w", err)
+	}
+
+	return repo, nil
+}
+
+func (r *RepositoryRepository) CreateInternalSyncRunForRepository(ctx context.Context, repositoryID int64, syncType string, trigger SyncRunTrigger) (SyncRunRequestResult, error) {
+	activeRun, found, err := r.findActiveSyncRunForRepository(ctx, repositoryID)
+	if err != nil {
+		return SyncRunRequestResult{}, fmt.Errorf("find active sync run: %w", err)
+	}
+	if found {
+		requestStatus := SyncRunRequestStatusAlreadyQueued
+		if activeRun.Status == "running" {
+			requestStatus = SyncRunRequestStatusAlreadyRunning
+		}
+		return SyncRunRequestResult{
+			SyncRun:       activeRun,
+			RequestStatus: requestStatus,
+		}, nil
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return SyncRunRequestResult{}, fmt.Errorf("begin create internal sync run transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	const query = `
+		INSERT INTO repository_sync_runs (
+			repository_id,
+			sync_type,
+			trigger_source,
+			trigger_delivery_id,
+			trigger_ref,
+			before_sha,
+			after_sha,
+			status
+		)
+		SELECT
+			r.id,
+			$2,
+			$3,
+			$4,
+			$5,
+			$6,
+			$7,
+			'queued'
+		FROM repositories r
+		WHERE r.id = $1
+		RETURNING
+			id,
+			repository_id,
+			sync_type,
+			trigger_source,
+			trigger_delivery_id,
+			trigger_ref,
+			before_sha,
+			after_sha,
+			status,
+			created_at
+	`
+
+	var run SyncRun
+	triggerSource := strings.TrimSpace(trigger.Source)
+	if triggerSource == "" {
+		triggerSource = "manual"
+	}
+
+	err = tx.QueryRow(
+		ctx,
+		query,
+		repositoryID,
+		syncType,
+		triggerSource,
+		nullIfEmptyPointer(trigger.DeliveryID),
+		nullIfEmptyPointer(trigger.Ref),
+		nullIfEmptyPointer(trigger.BeforeSHA),
+		nullIfEmptyPointer(trigger.AfterSHA),
+	).Scan(
+		&run.ID,
+		&run.RepositoryID,
+		&run.SyncType,
+		&run.TriggerSource,
+		&run.TriggerDeliveryID,
+		&run.TriggerRef,
+		&run.BeforeSHA,
+		&run.AfterSHA,
+		&run.Status,
+		&run.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return SyncRunRequestResult{}, ErrRepositoryNotFound
+		}
+		return SyncRunRequestResult{}, fmt.Errorf("create internal sync run: %w", err)
+	}
+
+	tag, err := tx.Exec(
+		ctx,
+		`UPDATE repositories SET sync_status = 'pending', updated_at = NOW() WHERE id = $1`,
+		repositoryID,
+	)
+	if err != nil {
+		return SyncRunRequestResult{}, fmt.Errorf("mark repository pending: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return SyncRunRequestResult{}, ErrRepositoryNotFound
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return SyncRunRequestResult{}, fmt.Errorf("commit create internal sync run transaction: %w", err)
+	}
+
+	return SyncRunRequestResult{
+		SyncRun:       run,
+		RequestStatus: SyncRunRequestStatusQueued,
+	}, nil
+}
+
+func nullIfEmptyPointer(value *string) any {
+	if value == nil {
+		return nil
+	}
+
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil
+	}
+
+	return trimmed
+}
+
 func (r *RepositoryRepository) MarkSyncRunRunning(ctx context.Context, syncRunID int64, repositoryID int64, expectedCreatedAt time.Time) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -118,6 +306,104 @@ func (r *RepositoryRepository) MarkSyncRunRunning(ctx context.Context, syncRunID
 	}
 
 	return nil
+}
+
+func (r *RepositoryRepository) RepositorySnapshotSummary(ctx context.Context, repositoryID int64) (SyncRunSummary, error) {
+	const query = `
+		SELECT
+			(SELECT COUNT(*) FROM repository_contributors WHERE repository_id = $1) AS contributors_count,
+			(SELECT COUNT(*) FROM commits WHERE repository_id = $1) AS commits_count,
+			(SELECT COUNT(*) FROM commit_files WHERE repository_id = $1) AS commit_files_count,
+			(SELECT COUNT(*) FROM modules WHERE repository_id = $1) AS modules_count,
+			(SELECT COUNT(*) FROM files WHERE repository_id = $1) AS files_count
+	`
+
+	var summary SyncRunSummary
+	if err := r.db.QueryRow(ctx, query, repositoryID).Scan(
+		&summary.ContributorsCount,
+		&summary.CommitsCount,
+		&summary.CommitFilesCount,
+		&summary.ModulesCount,
+		&summary.FilesCount,
+	); err != nil {
+		return SyncRunSummary{}, fmt.Errorf("query repository snapshot summary: %w", err)
+	}
+
+	return summary, nil
+}
+
+func (r *RepositoryRepository) MarkStaleSyncRunsFailed(ctx context.Context, staleAfter time.Duration) (int64, error) {
+	if staleAfter <= 0 {
+		return 0, nil
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin stale sync run sweep transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	cutoff := time.Now().UTC().Add(-staleAfter)
+	const staleMessage = "sync worker timed out or stopped before completion"
+
+	rows, err := tx.Query(
+		ctx,
+		`UPDATE repository_sync_runs
+		 SET status = 'failed',
+		     completed_at = NOW(),
+		     error_message = $2,
+		     duration_ms = CASE
+		         WHEN started_at IS NULL THEN duration_ms
+		         ELSE GREATEST((EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000)::BIGINT, 0)
+		     END
+		 WHERE status IN ('queued', 'running')
+		   AND COALESCE(started_at, created_at) < $1
+		 RETURNING repository_id`,
+		cutoff,
+		staleMessage,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("mark stale sync runs failed: %w", err)
+	}
+	defer rows.Close()
+
+	repositoryIDs := make([]int64, 0)
+	seenRepositoryIDs := make(map[int64]struct{})
+	var count int64
+	for rows.Next() {
+		var repositoryID int64
+		if err := rows.Scan(&repositoryID); err != nil {
+			return 0, fmt.Errorf("scan stale sync run repository id: %w", err)
+		}
+		count++
+		if _, exists := seenRepositoryIDs[repositoryID]; exists {
+			continue
+		}
+		seenRepositoryIDs[repositoryID] = struct{}{}
+		repositoryIDs = append(repositoryIDs, repositoryID)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate stale sync run repository ids: %w", err)
+	}
+
+	if len(repositoryIDs) > 0 {
+		if _, err := tx.Exec(
+			ctx,
+			`UPDATE repositories
+			 SET sync_status = 'failed',
+			     updated_at = NOW()
+			 WHERE id = ANY($1)`,
+			repositoryIDs,
+		); err != nil {
+			return 0, fmt.Errorf("mark repositories failed during stale sweep: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit stale sync run sweep transaction: %w", err)
+	}
+
+	return count, nil
 }
 
 func (r *RepositoryRepository) ReplaceContributors(ctx context.Context, repositoryID int64, contributors []sharedgithub.RepositoryContributor) error {
@@ -368,6 +654,225 @@ func (r *RepositoryRepository) ReplaceCommitData(ctx context.Context, repository
 
 	if err := tx.Commit(ctx); err != nil {
 		return CommitImportStats{}, fmt.Errorf("commit replace commit data transaction: %w", err)
+	}
+
+	return stats, nil
+}
+
+func (r *RepositoryRepository) UpsertCommitDataIncremental(ctx context.Context, repositoryID int64, commits []sharedgithub.RepositoryCommit) (CommitImportStats, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return CommitImportStats{}, fmt.Errorf("begin incremental commit data transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	reverseCommitsInPlace(commits)
+
+	moduleIDs := make(map[string]int64)
+	fileIDs := make(map[string]int64)
+	stats := CommitImportStats{}
+
+	if err := r.loadRepositoryModules(ctx, tx, repositoryID, moduleIDs); err != nil {
+		return CommitImportStats{}, err
+	}
+	if err := r.loadRepositoryFiles(ctx, tx, repositoryID, fileIDs); err != nil {
+		return CommitImportStats{}, err
+	}
+
+	const insertModuleQuery = `
+		INSERT INTO modules (repository_id, name, path_prefix)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (repository_id, name)
+		DO UPDATE SET
+			path_prefix = EXCLUDED.path_prefix,
+			updated_at = NOW()
+		RETURNING id
+	`
+	const insertFileQuery = `
+		INSERT INTO files (
+			repository_id,
+			module_id,
+			path,
+			extension,
+			is_deleted,
+			first_seen_commit_sha,
+			last_seen_commit_sha
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (repository_id, path)
+		DO UPDATE SET
+			module_id = EXCLUDED.module_id,
+			extension = EXCLUDED.extension,
+			is_deleted = EXCLUDED.is_deleted,
+			last_seen_commit_sha = EXCLUDED.last_seen_commit_sha,
+			updated_at = NOW()
+		RETURNING id
+	`
+	const insertCommitQuery = `
+		INSERT INTO commits (
+			repository_id,
+			github_commit_sha,
+			author_github_user_id,
+			author_username,
+			author_name,
+			author_email,
+			committed_at,
+			message,
+			parent_count,
+			additions,
+			deletions,
+			total_changes
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		ON CONFLICT (repository_id, github_commit_sha)
+		DO NOTHING
+		RETURNING id
+	`
+	const selectCommitIDQuery = `
+		SELECT id FROM commits WHERE repository_id = $1 AND github_commit_sha = $2
+	`
+	const markFileDeletedQuery = `
+		UPDATE files
+		SET is_deleted = TRUE,
+			last_seen_commit_sha = $2,
+			updated_at = NOW()
+		WHERE id = $1
+	`
+	const insertCommitFileQuery = `
+		INSERT INTO commit_files (
+			commit_id,
+			repository_id,
+			file_id,
+			module_id,
+			path,
+			previous_path,
+			change_type,
+			additions,
+			deletions,
+			changes,
+			patch_text
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`
+
+	for _, commit := range commits {
+		var authorGitHubUserID any
+		if commit.AuthorGitHubUserID != nil {
+			authorGitHubUserID = *commit.AuthorGitHubUserID
+		}
+
+		var commitID int64
+		commitInserted := true
+		err := tx.QueryRow(
+			ctx,
+			insertCommitQuery,
+			repositoryID,
+			commit.SHA,
+			authorGitHubUserID,
+			nullIfEmpty(commit.AuthorUsername),
+			nullIfEmpty(commit.AuthorName),
+			nullIfEmpty(commit.AuthorEmail),
+			commit.CommittedAt,
+			nullIfEmpty(commit.Message),
+			commit.ParentCount,
+			commit.Additions,
+			commit.Deletions,
+			commit.TotalChanges,
+		).Scan(&commitID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				commitInserted = false
+				if err := tx.QueryRow(ctx, selectCommitIDQuery, repositoryID, commit.SHA).Scan(&commitID); err != nil {
+					return CommitImportStats{}, fmt.Errorf("select existing commit %s: %w", commit.SHA, err)
+				}
+			} else {
+				return CommitImportStats{}, fmt.Errorf("insert commit %s: %w", commit.SHA, err)
+			}
+		}
+		if !commitInserted {
+			continue
+		}
+
+		stats.CommitsCount++
+
+		for _, changedFile := range commit.Files {
+			moduleName, modulePrefix := deriveModule(changedFile.Path)
+			moduleKey := moduleName + "|" + modulePrefix
+
+			moduleID, ok := moduleIDs[moduleKey]
+			if !ok {
+				if err := tx.QueryRow(ctx, insertModuleQuery, repositoryID, moduleName, modulePrefix).Scan(&moduleID); err != nil {
+					return CommitImportStats{}, fmt.Errorf("upsert module %s: %w", moduleName, err)
+				}
+				moduleIDs[moduleKey] = moduleID
+			}
+
+			fileID, ok := fileIDs[changedFile.Path]
+			extension := normalizeExtension(changedFile.Path)
+			isDeleted := changedFile.ChangeType == "deleted"
+			if !ok {
+				if err := tx.QueryRow(
+					ctx,
+					insertFileQuery,
+					repositoryID,
+					moduleID,
+					changedFile.Path,
+					nullIfEmpty(extension),
+					isDeleted,
+					commit.SHA,
+					commit.SHA,
+				).Scan(&fileID); err != nil {
+					return CommitImportStats{}, fmt.Errorf("upsert file %s: %w", changedFile.Path, err)
+				}
+				fileIDs[changedFile.Path] = fileID
+			} else {
+				if err := tx.QueryRow(
+					ctx,
+					insertFileQuery,
+					repositoryID,
+					moduleID,
+					changedFile.Path,
+					nullIfEmpty(extension),
+					isDeleted,
+					commit.SHA,
+					commit.SHA,
+				).Scan(&fileID); err != nil {
+					return CommitImportStats{}, fmt.Errorf("refresh file %s: %w", changedFile.Path, err)
+				}
+				fileIDs[changedFile.Path] = fileID
+			}
+
+			if changedFile.PreviousPath != nil {
+				if previousFileID, found := fileIDs[*changedFile.PreviousPath]; found {
+					if _, err := tx.Exec(ctx, markFileDeletedQuery, previousFileID, commit.SHA); err != nil {
+						return CommitImportStats{}, fmt.Errorf("mark previous file deleted %s: %w", *changedFile.PreviousPath, err)
+					}
+				}
+			}
+
+			if _, err := tx.Exec(
+				ctx,
+				insertCommitFileQuery,
+				commitID,
+				repositoryID,
+				fileID,
+				moduleID,
+				changedFile.Path,
+				changedFile.PreviousPath,
+				changedFile.ChangeType,
+				changedFile.Additions,
+				changedFile.Deletions,
+				changedFile.Changes,
+				changedFile.PatchText,
+			); err != nil {
+				return CommitImportStats{}, fmt.Errorf("insert incremental commit file %s for commit %s: %w", changedFile.Path, commit.SHA, err)
+			}
+			stats.CommitFilesCount++
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return CommitImportStats{}, fmt.Errorf("commit incremental commit data transaction: %w", err)
 	}
 
 	return stats, nil
@@ -962,6 +1467,96 @@ func reverseCommitsInPlace(commits []sharedgithub.RepositoryCommit) {
 	for left, right := 0, len(commits)-1; left < right; left, right = left+1, right-1 {
 		commits[left], commits[right] = commits[right], commits[left]
 	}
+}
+
+func (r *RepositoryRepository) findActiveSyncRunForRepository(ctx context.Context, repositoryID int64) (SyncRun, bool, error) {
+	const query = `
+		SELECT
+			id,
+			repository_id,
+			sync_type,
+			trigger_source,
+			trigger_delivery_id,
+			trigger_ref,
+			before_sha,
+			after_sha,
+			status,
+			created_at
+		FROM repository_sync_runs
+		WHERE repository_id = $1
+		  AND status IN ('queued', 'running')
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1
+	`
+
+	var run SyncRun
+	err := r.db.QueryRow(ctx, query, repositoryID).Scan(
+		&run.ID,
+		&run.RepositoryID,
+		&run.SyncType,
+		&run.TriggerSource,
+		&run.TriggerDeliveryID,
+		&run.TriggerRef,
+		&run.BeforeSHA,
+		&run.AfterSHA,
+		&run.Status,
+		&run.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return SyncRun{}, false, nil
+		}
+		return SyncRun{}, false, fmt.Errorf("find active sync run for repository: %w", err)
+	}
+
+	return run, true, nil
+}
+
+func (r *RepositoryRepository) loadRepositoryModules(ctx context.Context, tx pgx.Tx, repositoryID int64, moduleIDs map[string]int64) error {
+	rows, err := tx.Query(ctx, `SELECT id, name, path_prefix FROM modules WHERE repository_id = $1`, repositoryID)
+	if err != nil {
+		return fmt.Errorf("load repository modules: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var moduleID int64
+		var name string
+		var pathPrefix string
+		if err := rows.Scan(&moduleID, &name, &pathPrefix); err != nil {
+			return fmt.Errorf("scan repository module: %w", err)
+		}
+		moduleIDs[name+"|"+pathPrefix] = moduleID
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate repository modules: %w", err)
+	}
+
+	return nil
+}
+
+func (r *RepositoryRepository) loadRepositoryFiles(ctx context.Context, tx pgx.Tx, repositoryID int64, fileIDs map[string]int64) error {
+	rows, err := tx.Query(ctx, `SELECT id, path FROM files WHERE repository_id = $1`, repositoryID)
+	if err != nil {
+		return fmt.Errorf("load repository files: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var fileID int64
+		var filePath string
+		if err := rows.Scan(&fileID, &filePath); err != nil {
+			return fmt.Errorf("scan repository file: %w", err)
+		}
+		fileIDs[filePath] = fileID
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate repository files: %w", err)
+	}
+
+	return nil
 }
 
 func deriveModule(filePath string) (string, string) {

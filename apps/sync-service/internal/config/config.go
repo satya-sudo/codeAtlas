@@ -16,11 +16,15 @@ type Config struct {
 	LogJSON                     bool
 	PollInterval                time.Duration
 	ShutdownTimeout             time.Duration
+	StaleSyncRunTimeout         time.Duration
+	StaleSyncSweepInterval      time.Duration
 	GitHubAPITimeout            time.Duration
 	KafkaEnabled                bool
 	KafkaBrokers                []string
 	RepositorySyncTopic         string
 	RepositorySyncConsumerGroup string
+	GitHubPushTopic             string
+	GitHubPushConsumerGroup     string
 	GitHubAppSlug               string
 	GitHubAppID                 int64
 	GitHubAppClientID           string
@@ -40,6 +44,16 @@ func Load() (Config, error) {
 	}
 
 	shutdownTimeout, err := sharedconfig.GetDuration("SYNC_SERVICE_SHUTDOWN_TIMEOUT", 10*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+
+	staleSyncRunTimeout, err := sharedconfig.GetDuration("SYNC_SERVICE_STALE_RUN_TIMEOUT", 20*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+
+	staleSyncSweepInterval, err := sharedconfig.GetDuration("SYNC_SERVICE_STALE_SWEEP_INTERVAL", time.Minute)
 	if err != nil {
 		return Config{}, err
 	}
@@ -75,11 +89,15 @@ func Load() (Config, error) {
 		LogJSON:                     logJSON,
 		PollInterval:                pollInterval,
 		ShutdownTimeout:             shutdownTimeout,
+		StaleSyncRunTimeout:         staleSyncRunTimeout,
+		StaleSyncSweepInterval:      staleSyncSweepInterval,
 		GitHubAPITimeout:            githubTimeout,
 		KafkaEnabled:                kafkaEnabled,
 		KafkaBrokers:                kafkaBrokers,
 		RepositorySyncTopic:         sharedconfig.GetString("SYNC_SERVICE_REPOSITORY_SYNC_TOPIC", events.RepositorySyncRequestedTopic),
 		RepositorySyncConsumerGroup: sharedconfig.GetString("SYNC_SERVICE_CONSUMER_GROUP", "codeatlas-sync-service"),
+		GitHubPushTopic:             sharedconfig.GetString("SYNC_SERVICE_GITHUB_PUSH_TOPIC", events.GitHubPushReceivedTopic),
+		GitHubPushConsumerGroup:     sharedconfig.GetString("SYNC_SERVICE_GITHUB_PUSH_CONSUMER_GROUP", "codeatlas-sync-service-github-push"),
 		GitHubAppSlug:               sharedconfig.GetString("GITHUB_APP_SLUG", ""),
 		GitHubAppID:                 int64(githubAppID),
 		GitHubAppClientID:           sharedconfig.GetString("GITHUB_APP_CLIENT_ID", ""),
