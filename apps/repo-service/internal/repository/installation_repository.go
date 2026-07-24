@@ -63,6 +63,7 @@ func (r *InstallationRepository) ClaimInstallation(ctx context.Context, installa
 	const query = `
 		UPDATE github_app_installations
 		SET installed_by_user_id = $2,
+			status = 'active',
 			updated_at = NOW()
 		WHERE installation_id = $1
 		RETURNING

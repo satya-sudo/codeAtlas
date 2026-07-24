@@ -19,7 +19,7 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	application, err := app.New(cfg)
+	application, err := app.New(ctx, cfg)
 	if err != nil {
 		log.Fatalf("create app: %v", err)
 	}

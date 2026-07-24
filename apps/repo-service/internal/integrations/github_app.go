@@ -60,3 +60,21 @@ func (g *GitHubApp) ListInstallationRepositories(ctx context.Context, installati
 
 	return repositories, nil
 }
+
+func (g *GitHubApp) ListRepositoryWebhooks(ctx context.Context, installationID int64, owner string, repo string) ([]sharedgithub.RepositoryWebhook, error) {
+	webhooks, err := g.client.ListRepositoryWebhooks(ctx, installationID, owner, repo)
+	if err != nil {
+		return nil, fmt.Errorf("list repository webhooks: %w", err)
+	}
+
+	return webhooks, nil
+}
+
+func (g *GitHubApp) CreateRepositoryWebhook(ctx context.Context, installationID int64, owner string, repo string, input sharedgithub.RepositoryWebhookInput) (sharedgithub.RepositoryWebhook, error) {
+	webhook, err := g.client.CreateRepositoryWebhook(ctx, installationID, owner, repo, input)
+	if err != nil {
+		return sharedgithub.RepositoryWebhook{}, fmt.Errorf("create repository webhook: %w", err)
+	}
+
+	return webhook, nil
+}

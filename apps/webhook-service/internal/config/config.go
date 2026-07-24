@@ -5,6 +5,7 @@ import (
 	"time"
 
 	sharedconfig "codeatlas/packages/config"
+	"codeatlas/packages/database"
 	"codeatlas/packages/events"
 	sharedkafka "codeatlas/packages/kafka"
 )
@@ -20,6 +21,7 @@ type Config struct {
 	KafkaEnabled        bool
 	KafkaBrokers        []string
 	GitHubPushTopic     string
+	Postgres            database.PostgresConfig
 }
 
 func Load() (Config, error) {
@@ -52,6 +54,11 @@ func Load() (Config, error) {
 		}
 	}
 
+	postgresCfg, err := database.LoadPostgresConfigFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		ServiceName:         "webhook-service",
 		AppEnv:              sharedconfig.GetString("APP_ENV", "development"),
@@ -63,5 +70,6 @@ func Load() (Config, error) {
 		KafkaEnabled:        kafkaEnabled,
 		KafkaBrokers:        kafkaBrokers,
 		GitHubPushTopic:     sharedconfig.GetString("WEBHOOK_SERVICE_GITHUB_PUSH_TOPIC", events.GitHubPushReceivedTopic),
+		Postgres:            postgresCfg,
 	}, nil
 }

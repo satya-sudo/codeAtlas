@@ -191,6 +191,57 @@ func (r *RepositoryRepository) ListRepositoriesForUser(ctx context.Context, user
 	return repositories, nil
 }
 
+func (r *RepositoryRepository) UpdateRepositoryWebhookID(ctx context.Context, userID int64, repositoryID int64, webhookID int64) (repos.Repository, error) {
+	const query = `
+		UPDATE repositories r
+		SET webhook_id = $3,
+			updated_at = NOW()
+		FROM user_repositories ur
+		WHERE ur.user_id = $1
+		  AND ur.repository_id = r.id
+		  AND r.id = $2
+		RETURNING
+			r.id,
+			r.github_repo_id,
+			r.owner,
+			r.name,
+			r.full_name,
+			r.default_branch,
+			r.is_private,
+			r.installation_id,
+			r.webhook_id,
+			r.sync_status,
+			r.last_synced_at,
+			r.created_at,
+			r.updated_at
+	`
+
+	var repo repos.Repository
+	err := r.db.QueryRow(ctx, query, userID, repositoryID, webhookID).Scan(
+		&repo.ID,
+		&repo.GitHubRepoID,
+		&repo.Owner,
+		&repo.Name,
+		&repo.FullName,
+		&repo.DefaultBranch,
+		&repo.IsPrivate,
+		&repo.InstallationID,
+		&repo.WebhookID,
+		&repo.SyncStatus,
+		&repo.LastSyncedAt,
+		&repo.CreatedAt,
+		&repo.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return repos.Repository{}, ErrRepositoryNotFound
+		}
+		return repos.Repository{}, fmt.Errorf("update repository webhook id: %w", err)
+	}
+
+	return repo, nil
+}
+
 func (r *RepositoryRepository) FindRepositoryForUser(ctx context.Context, userID int64, repositoryID int64) (repos.Repository, error) {
 	const query = `
 		SELECT

@@ -24,6 +24,8 @@ type Config struct {
 	GitHubAppClientID              string
 	GitHubAppPrivateKeyPath        string
 	GitHubAPIBaseURL               string
+	GitHubWebhookURL               string
+	GitHubWebhookSecret            string
 	KafkaEnabled                   bool
 	KafkaBrokers                   []string
 	RepositorySyncRequestedTopic   string
@@ -84,6 +86,8 @@ func Load() (Config, error) {
 		GitHubAppClientID:              sharedconfig.GetString("GITHUB_APP_CLIENT_ID", ""),
 		GitHubAppPrivateKeyPath:        sharedconfig.GetString("GITHUB_APP_PRIVATE_KEY_PATH", ""),
 		GitHubAPIBaseURL:               sharedconfig.GetString("GITHUB_API_BASE_URL", "https://api.github.com"),
+		GitHubWebhookURL:               sharedconfig.GetString("GITHUB_WEBHOOK_URL", ""),
+		GitHubWebhookSecret:            sharedconfig.GetString("GITHUB_WEBHOOK_SECRET", ""),
 		KafkaEnabled:                   kafkaEnabled,
 		KafkaBrokers:                   kafkaBrokers,
 		RepositorySyncRequestedTopic:   sharedconfig.GetString("REPO_SERVICE_SYNC_REQUESTED_TOPIC", events.RepositorySyncRequestedTopic),

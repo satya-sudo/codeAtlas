@@ -15,6 +15,7 @@ import (
 	"codeatlas/apps/repo-service/internal/repos"
 	"codeatlas/apps/repo-service/internal/repository"
 	"codeatlas/packages/events"
+	sharedgithub "codeatlas/packages/github"
 	"codeatlas/packages/kafka"
 )
 
@@ -419,6 +420,87 @@ func (h *Handler) handleConnectInstallationRepository(w http.ResponseWriter, r *
 	statusCode := http.StatusOK
 	if result.ConnectionStatus == repos.ConnectionStatusCreated {
 		statusCode = http.StatusCreated
+	}
+
+	if result.Repository.WebhookID == nil {
+		webhookURL := strings.TrimSpace(h.config.GitHubWebhookURL)
+		if webhookURL == "" {
+			h.logger.Error(
+				"github webhook url is not configured",
+				"repository_id", result.Repository.ID,
+				"github_repo_id", result.Repository.GitHubRepoID,
+			)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "github webhook url is not configured",
+			})
+			return
+		}
+
+		normalizedWebhookURL := sharedgithub.NormalizeWebhookURL(webhookURL)
+		webhooks, err := h.githubApp.ListRepositoryWebhooks(r.Context(), installation.InstallationID, selectedRepo.OwnerLogin, selectedRepo.Name)
+		if err != nil {
+			h.logger.Error(
+				"list github repository webhooks",
+				"error", err,
+				"repository_id", result.Repository.ID,
+				"github_repo_id", result.Repository.GitHubRepoID,
+				"installation_id", installation.InstallationID,
+			)
+			writeJSON(w, http.StatusBadGateway, map[string]string{
+				"error": "failed to inspect github repository webhooks",
+			})
+			return
+		}
+
+		var webhookID int64
+		for i := range webhooks {
+			if sharedgithub.NormalizeWebhookURL(webhooks[i].Config.URL) == normalizedWebhookURL {
+				webhookID = webhooks[i].ID
+				break
+			}
+		}
+
+		if webhookID == 0 {
+			webhook, err := h.githubApp.CreateRepositoryWebhook(r.Context(), installation.InstallationID, selectedRepo.OwnerLogin, selectedRepo.Name, sharedgithub.RepositoryWebhookInput{
+				URL:         webhookURL,
+				Secret:      h.config.GitHubWebhookSecret,
+				ContentType: "json",
+				Events:      []string{"push", "pull_request"},
+				Active:      true,
+			})
+			if err != nil {
+				h.logger.Error(
+					"create github repository webhook",
+					"error", err,
+					"repository_id", result.Repository.ID,
+					"github_repo_id", result.Repository.GitHubRepoID,
+					"installation_id", installation.InstallationID,
+				)
+				writeJSON(w, http.StatusBadGateway, map[string]string{
+					"error": "failed to create github repository webhook",
+				})
+				return
+			}
+
+			webhookID = webhook.ID
+		}
+
+		updatedRepository, err := h.repositoryRepo.UpdateRepositoryWebhookID(r.Context(), userID, result.Repository.ID, webhookID)
+		if err != nil {
+			h.logger.Error(
+				"persist repository webhook id",
+				"error", err,
+				"repository_id", result.Repository.ID,
+				"github_repo_id", result.Repository.GitHubRepoID,
+				"webhook_id", webhookID,
+			)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "failed to persist repository webhook metadata",
+			})
+			return
+		}
+
+		result.Repository = updatedRepository
 	}
 
 	writeJSON(w, statusCode, result)

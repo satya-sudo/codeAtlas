@@ -47,6 +47,7 @@ func New(cfg serviceconfig.Config) (*App, error) {
 		{Prefix: "/repos", Target: repoURL},
 		{Prefix: "/repos/", Target: repoURL},
 		{Prefix: "/integrations/github/", Target: repoURL},
+		{Prefix: "/webhooks/github", Target: webhookURL},
 		{Prefix: "/webhooks/github/", Target: webhookURL},
 	})
 	if err := handler.Register(mux); err != nil {

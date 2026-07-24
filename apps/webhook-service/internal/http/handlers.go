@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	serviceconfig "codeatlas/apps/webhook-service/internal/config"
+	"codeatlas/apps/webhook-service/internal/repository"
 	"codeatlas/packages/events"
 	"codeatlas/packages/kafka"
 )
@@ -20,16 +22,18 @@ import (
 const maxGitHubWebhookBodyBytes = 5 << 20
 
 type Handler struct {
-	config   serviceconfig.Config
-	logger   *slog.Logger
-	producer kafka.Producer
+	config     serviceconfig.Config
+	logger     *slog.Logger
+	producer   kafka.Producer
+	deliveries *repository.WebhookDeliveryRepository
 }
 
-func NewHandler(config serviceconfig.Config, logger *slog.Logger, producer kafka.Producer) *Handler {
+func NewHandler(config serviceconfig.Config, logger *slog.Logger, producer kafka.Producer, deliveries *repository.WebhookDeliveryRepository) *Handler {
 	return &Handler{
-		config:   config,
-		logger:   logger,
-		producer: producer,
+		config:     config,
+		logger:     logger,
+		producer:   producer,
+		deliveries: deliveries,
 	}
 }
 
@@ -39,9 +43,11 @@ func (h *Handler) Register(mux *http.ServeMux) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/webhooks/github", h.handleGitHubWebhook)
+	mux.HandleFunc("/webhooks/github/", h.handleGitHubWebhook)
 }
 
 type githubWebhookEnvelope struct {
+	Action       string `json:"action"`
 	Ref          string `json:"ref"`
 	Before       string `json:"before"`
 	After        string `json:"after"`
@@ -104,7 +110,67 @@ func (h *Handler) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var payload githubWebhookEnvelope
+	if err := json.Unmarshal(body, &payload); err != nil {
+		h.logger.Error("decode github webhook payload", "error", err, "delivery_id", deliveryID, "event", eventName)
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid github webhook payload",
+		})
+		return
+	}
+
+	var installationID *int64
+	if payload.Installation != nil && payload.Installation.ID != 0 {
+		installationID = &payload.Installation.ID
+	}
+
+	var repositoryID *int64
+	if payload.Repository.ID != 0 {
+		repositoryID = &payload.Repository.ID
+	}
+
+	var action *string
+	if value := strings.TrimSpace(payload.Action); value != "" {
+		action = &value
+	}
+
+	delivery, created, err := h.deliveries.CreateIfNotExists(r.Context(), repository.CreateWebhookDeliveryInput{
+		DeliveryID:     deliveryID,
+		Event:          eventName,
+		Action:         action,
+		RepositoryID:   repositoryID,
+		InstallationID: installationID,
+		Status:         repository.WebhookDeliveryStatusReceived,
+		PayloadJSON:    body,
+		ReceivedAt:     time.Now().UTC(),
+	})
+	if err != nil {
+		h.logger.Error("store github webhook delivery", "error", err, "delivery_id", deliveryID, "event", eventName)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to persist webhook delivery",
+		})
+		return
+	}
+
+	if !created {
+		h.logger.Info(
+			"duplicate github webhook delivery ignored",
+			"delivery_id", deliveryID,
+			"event", eventName,
+			"status", delivery.Status,
+		)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":      "duplicate_ignored",
+			"event":       eventName,
+			"delivery_id": deliveryID,
+		})
+		return
+	}
+
 	if eventName != "push" {
+		if err := h.deliveries.MarkStatus(r.Context(), deliveryID, repository.WebhookDeliveryStatusIgnored, nil); err != nil {
+			h.logger.Error("mark github webhook delivery ignored", "error", err, "delivery_id", deliveryID, "event", eventName)
+		}
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"status":      "ignored",
 			"event":       eventName,
@@ -113,25 +179,15 @@ func (h *Handler) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload githubWebhookEnvelope
-	if err := json.Unmarshal(body, &payload); err != nil {
-		h.logger.Error("decode github push webhook", "error", err, "delivery_id", deliveryID)
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid github webhook payload",
-		})
-		return
-	}
-
 	if payload.Repository.ID == 0 || strings.TrimSpace(payload.Repository.FullName) == "" {
+		message := "missing repository information in webhook payload"
+		if err := h.deliveries.MarkStatus(r.Context(), deliveryID, repository.WebhookDeliveryStatusFailed, &message); err != nil {
+			h.logger.Error("mark github webhook delivery failed", "error", err, "delivery_id", deliveryID, "event", eventName)
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "missing repository information in webhook payload",
+			"error": message,
 		})
 		return
-	}
-
-	var installationID *int64
-	if payload.Installation != nil && payload.Installation.ID != 0 {
-		installationID = &payload.Installation.ID
 	}
 
 	var headCommitSHA *string
@@ -166,10 +222,20 @@ func (h *Handler) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			"repository_id", normalized.RepositoryID,
 			"error", err,
 		)
+		message := "failed to publish webhook event"
+		if markErr := h.deliveries.MarkStatus(r.Context(), deliveryID, repository.WebhookDeliveryStatusFailed, &message); markErr != nil {
+			h.logger.Error("mark github webhook delivery failed", "error", markErr, "delivery_id", deliveryID)
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{
-			"error": "failed to publish webhook event",
+			"error": message,
 		})
 		return
+	}
+
+	if err := h.deliveries.MarkStatus(r.Context(), deliveryID, repository.WebhookDeliveryStatusPublished, nil); err != nil {
+		if !errors.Is(err, repository.ErrWebhookDeliveryNotFound) {
+			h.logger.Error("mark github webhook delivery published", "error", err, "delivery_id", deliveryID)
+		}
 	}
 
 	h.logger.Info(

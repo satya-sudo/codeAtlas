@@ -9,18 +9,22 @@ import (
 
 	serviceconfig "codeatlas/apps/webhook-service/internal/config"
 	httpapi "codeatlas/apps/webhook-service/internal/http"
+	"codeatlas/apps/webhook-service/internal/repository"
+	"codeatlas/packages/database"
 	"codeatlas/packages/kafka"
 	"codeatlas/packages/logger"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type App struct {
 	config   serviceconfig.Config
 	logger   *slog.Logger
+	db       *pgxpool.Pool
 	server   *http.Server
 	producer kafka.Producer
 }
 
-func New(cfg serviceconfig.Config) (*App, error) {
+func New(ctx context.Context, cfg serviceconfig.Config) (*App, error) {
 	log, err := logger.New(logger.Config{
 		Service: cfg.ServiceName,
 		Level:   cfg.LogLevel,
@@ -30,6 +34,11 @@ func New(cfg serviceconfig.Config) (*App, error) {
 		return nil, fmt.Errorf("initialize logger: %w", err)
 	}
 
+	dbPool, err := database.NewPostgresPool(ctx, cfg.Postgres)
+	if err != nil {
+		return nil, fmt.Errorf("connect postgres: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	producer := kafka.NewProducer(kafka.ProducerConfig{
 		Logger:   log,
@@ -37,7 +46,8 @@ func New(cfg serviceconfig.Config) (*App, error) {
 		Brokers:  cfg.KafkaBrokers,
 		ClientID: cfg.ServiceName,
 	})
-	handler := httpapi.NewHandler(cfg, log, producer)
+	deliveryRepo := repository.NewWebhookDeliveryRepository(dbPool)
+	handler := httpapi.NewHandler(cfg, log, producer, deliveryRepo)
 	handler.Register(mux)
 
 	server := &http.Server{
@@ -49,6 +59,7 @@ func New(cfg serviceconfig.Config) (*App, error) {
 	return &App{
 		config:   cfg,
 		logger:   log,
+		db:       dbPool,
 		server:   server,
 		producer: producer,
 	}, nil
@@ -71,9 +82,11 @@ func (a *App) Run(ctx context.Context) error {
 		defer cancel()
 
 		a.logger.Info("shutting down")
+		defer a.db.Close()
 		defer a.producer.Close()
 		return a.server.Shutdown(shutdownCtx)
 	case err := <-errCh:
+		a.db.Close()
 		_ = a.producer.Close()
 		return err
 	}
