@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -17,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,6 +65,26 @@ type InstallationRepository struct {
 	} `json:"owner"`
 }
 
+type RepositoryWebhook struct {
+	ID     int64 `json:"id"`
+	Config struct {
+		URL         string `json:"url"`
+		ContentType string `json:"content_type"`
+		InsecureSSL string `json:"insecure_ssl"`
+	} `json:"config"`
+	Events []string `json:"events"`
+	Active bool     `json:"active"`
+}
+
+type RepositoryWebhookInput struct {
+	URL         string
+	Secret      string
+	ContentType string
+	Events      []string
+	Active      bool
+	InsecureSSL bool
+}
+
 type RepositoryContributor struct {
 	ID            int64   `json:"id"`
 	Login         string  `json:"login"`
@@ -95,6 +117,35 @@ type RepositoryCommit struct {
 	Deletions          int                    `json:"deletions"`
 	TotalChanges       int                    `json:"total_changes"`
 	Files              []RepositoryCommitFile `json:"files"`
+}
+
+type APIError struct {
+	StatusCode       int
+	Message          string
+	DocumentationURL string
+	RetryAfter       time.Duration
+	RateLimited      bool
+}
+
+func (e *APIError) Error() string {
+	base := strings.TrimSpace(e.Message)
+	if base == "" {
+		base = fmt.Sprintf("github api status %d", e.StatusCode)
+	}
+
+	if e.RateLimited {
+		base = "GitHub rate limit reached: " + base
+	}
+
+	if e.RetryAfter > 0 {
+		base = fmt.Sprintf("%s. Retry after %s", base, e.RetryAfter.Round(time.Second))
+	}
+
+	if strings.TrimSpace(e.DocumentationURL) != "" {
+		base = fmt.Sprintf("%s (%s)", base, e.DocumentationURL)
+	}
+
+	return base
 }
 
 func NewAppClient(cfg AppClientConfig) (*AppClient, error) {
@@ -245,6 +296,126 @@ func (c *AppClient) ListInstallationRepositories(ctx context.Context, installati
 	return payload.Repositories, nil
 }
 
+func (c *AppClient) ListRepositoryWebhooks(ctx context.Context, installationID int64, owner string, repo string) ([]RepositoryWebhook, error) {
+	if installationID == 0 {
+		return nil, fmt.Errorf("installation id is required")
+	}
+	if strings.TrimSpace(owner) == "" || strings.TrimSpace(repo) == "" {
+		return nil, fmt.Errorf("repository owner and name are required")
+	}
+
+	token, err := c.CreateInstallationToken(ctx, installationID)
+	if err != nil {
+		return nil, err
+	}
+
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/hooks", c.apiBaseURL, url.PathEscape(owner), url.PathEscape(repo))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build repository webhooks request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+token.Token)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request repository webhooks: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, decodeGitHubError(resp)
+	}
+
+	var webhooks []RepositoryWebhook
+	if err := json.NewDecoder(resp.Body).Decode(&webhooks); err != nil {
+		return nil, fmt.Errorf("decode repository webhooks response: %w", err)
+	}
+
+	return webhooks, nil
+}
+
+func (c *AppClient) CreateRepositoryWebhook(ctx context.Context, installationID int64, owner string, repo string, input RepositoryWebhookInput) (RepositoryWebhook, error) {
+	if installationID == 0 {
+		return RepositoryWebhook{}, fmt.Errorf("installation id is required")
+	}
+	if strings.TrimSpace(owner) == "" || strings.TrimSpace(repo) == "" {
+		return RepositoryWebhook{}, fmt.Errorf("repository owner and name are required")
+	}
+	if strings.TrimSpace(input.URL) == "" {
+		return RepositoryWebhook{}, fmt.Errorf("webhook url is required")
+	}
+
+	token, err := c.CreateInstallationToken(ctx, installationID)
+	if err != nil {
+		return RepositoryWebhook{}, err
+	}
+
+	contentType := strings.TrimSpace(input.ContentType)
+	if contentType == "" {
+		contentType = "json"
+	}
+
+	events := input.Events
+	if len(events) == 0 {
+		events = []string{"push"}
+	}
+
+	payload := map[string]any{
+		"name":   "web",
+		"active": input.Active,
+		"events": events,
+		"config": map[string]string{
+			"url":          strings.TrimSpace(input.URL),
+			"content_type": contentType,
+			"secret":       input.Secret,
+			"insecure_ssl": "0",
+		},
+	}
+	if input.InsecureSSL {
+		payload["config"].(map[string]string)["insecure_ssl"] = "1"
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return RepositoryWebhook{}, fmt.Errorf("encode repository webhook request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/hooks", c.apiBaseURL, url.PathEscape(owner), url.PathEscape(repo))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return RepositoryWebhook{}, fmt.Errorf("build repository webhook request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+token.Token)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return RepositoryWebhook{}, fmt.Errorf("request repository webhook: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return RepositoryWebhook{}, decodeGitHubError(resp)
+	}
+
+	var webhook RepositoryWebhook
+	if err := json.NewDecoder(resp.Body).Decode(&webhook); err != nil {
+		return RepositoryWebhook{}, fmt.Errorf("decode repository webhook response: %w", err)
+	}
+
+	return webhook, nil
+}
+
+func NormalizeWebhookURL(raw string) string {
+	return strings.TrimRight(strings.TrimSpace(raw), "/")
+}
+
 func (c *AppClient) ListRepositoryContributors(ctx context.Context, installationID int64, owner string, repo string) ([]RepositoryContributor, error) {
 	token, err := c.CreateInstallationToken(ctx, installationID)
 	if err != nil {
@@ -252,46 +423,65 @@ func (c *AppClient) ListRepositoryContributors(ctx context.Context, installation
 	}
 
 	const perPage = 100
+	const maxAttempts = 3
 
 	allContributors := make([]RepositoryContributor, 0, perPage)
 	for page := 1; ; page++ {
-		endpoint := fmt.Sprintf(
-			"%s/repos/%s/%s/contributors?per_page=%d&page=%d",
-			c.apiBaseURL,
-			url.PathEscape(owner),
-			url.PathEscape(repo),
-			perPage,
-			page,
-		)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
-		if err != nil {
-			return nil, fmt.Errorf("build repository contributors request: %w", err)
-		}
-
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("Authorization", "Bearer "+token.Token)
-		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("request repository contributors page %d: %w", page, err)
-		}
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			defer resp.Body.Close()
-			return nil, decodeGitHubError(resp)
-		}
-
 		var contributors []RepositoryContributor
-		if err := json.NewDecoder(resp.Body).Decode(&contributors); err != nil {
-			if errors.Is(err, io.EOF) {
+		for attempt := 1; ; attempt++ {
+			endpoint := fmt.Sprintf(
+				"%s/repos/%s/%s/contributors?per_page=%d&page=%d",
+				c.apiBaseURL,
+				url.PathEscape(owner),
+				url.PathEscape(repo),
+				perPage,
+				page,
+			)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
+			if err != nil {
+				return nil, fmt.Errorf("build repository contributors request: %w", err)
+			}
+
+			req.Header.Set("Accept", "application/vnd.github+json")
+			req.Header.Set("Authorization", "Bearer "+token.Token)
+			req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				if attempt < maxAttempts && shouldRetryGitHubRequestError(ctx, err) {
+					if err := sleepWithContext(ctx, time.Duration(attempt)*500*time.Millisecond); err != nil {
+						return nil, err
+					}
+					continue
+				}
+				return nil, fmt.Errorf("request repository contributors page %d: %w", page, err)
+			}
+
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				if retryDelay, shouldRetry := getGitHubRetryDelay(resp, attempt); attempt < maxAttempts && shouldRetry {
+					resp.Body.Close()
+					if err := sleepWithContext(ctx, retryDelay); err != nil {
+						return nil, err
+					}
+					continue
+				}
+
+				defer resp.Body.Close()
+				return nil, decodeGitHubError(resp)
+			}
+
+			if err := json.NewDecoder(resp.Body).Decode(&contributors); err != nil {
+				if errors.Is(err, io.EOF) {
+					resp.Body.Close()
+					contributors = nil
+					break
+				}
 				resp.Body.Close()
-				break
+				return nil, fmt.Errorf("decode repository contributors response page %d: %w", page, err)
 			}
 			resp.Body.Close()
-			return nil, fmt.Errorf("decode repository contributors response page %d: %w", page, err)
+			break
 		}
-		resp.Body.Close()
 
 		allContributors = append(allContributors, contributors...)
 		if len(contributors) < perPage {
@@ -338,13 +528,19 @@ func (c *AppClient) ListRepositoryCommits(ctx context.Context, installationID in
 
 			resp, err := c.httpClient.Do(req)
 			if err != nil {
+				if attempt < maxAttempts && shouldRetryGitHubRequestError(ctx, err) {
+					if err := sleepWithContext(ctx, time.Duration(attempt)*500*time.Millisecond); err != nil {
+						return nil, err
+					}
+					continue
+				}
 				return nil, fmt.Errorf("request repository commits page %d: %w", page, err)
 			}
 
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				if attempt < maxAttempts && isRetryableGitHubStatus(resp.StatusCode) {
+				if retryDelay, shouldRetry := getGitHubRetryDelay(resp, attempt); attempt < maxAttempts && shouldRetry {
 					resp.Body.Close()
-					if err := sleepWithContext(ctx, time.Duration(attempt)*500*time.Millisecond); err != nil {
+					if err := sleepWithContext(ctx, retryDelay); err != nil {
 						return nil, err
 					}
 					continue
@@ -383,6 +579,111 @@ func (c *AppClient) ListRepositoryCommits(ctx context.Context, installationID in
 			}
 
 			// Preserve summary order even though detail fetches run concurrently.
+			commits[index] = commit
+			return nil
+		})
+	}
+
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+
+	return commits, nil
+}
+
+func (c *AppClient) ListRepositoryCommitsInRange(ctx context.Context, installationID int64, owner string, repo string, beforeSHA string, afterSHA string) ([]RepositoryCommit, error) {
+	if strings.TrimSpace(beforeSHA) == "" || strings.TrimSpace(afterSHA) == "" {
+		return nil, fmt.Errorf("before and after commit sha are required")
+	}
+	if isZeroGitCommitSHA(afterSHA) {
+		return []RepositoryCommit{}, nil
+	}
+	if isZeroGitCommitSHA(beforeSHA) {
+		return c.ListRepositoryCommits(ctx, installationID, owner, repo)
+	}
+
+	token, err := c.CreateInstallationToken(ctx, installationID)
+	if err != nil {
+		return nil, err
+	}
+
+	const maxAttempts = 3
+
+	type comparePayload struct {
+		Commits []struct {
+			SHA string `json:"sha"`
+		} `json:"commits"`
+	}
+
+	var payload comparePayload
+	for attempt := 1; ; attempt++ {
+		endpoint := fmt.Sprintf(
+			"%s/repos/%s/%s/compare/%s...%s",
+			c.apiBaseURL,
+			url.PathEscape(owner),
+			url.PathEscape(repo),
+			url.PathEscape(beforeSHA),
+			url.PathEscape(afterSHA),
+		)
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
+		if err != nil {
+			return nil, fmt.Errorf("build repository compare request: %w", err)
+		}
+
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("Authorization", "Bearer "+token.Token)
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			if attempt < maxAttempts && shouldRetryGitHubRequestError(ctx, err) {
+				if err := sleepWithContext(ctx, time.Duration(attempt)*500*time.Millisecond); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			return nil, fmt.Errorf("request repository compare: %w", err)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if retryDelay, shouldRetry := getGitHubRetryDelay(resp, attempt); attempt < maxAttempts && shouldRetry {
+				resp.Body.Close()
+				if err := sleepWithContext(ctx, retryDelay); err != nil {
+					return nil, err
+				}
+				continue
+			}
+
+			defer resp.Body.Close()
+			return nil, decodeGitHubError(resp)
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("decode repository compare response: %w", err)
+		}
+		resp.Body.Close()
+		break
+	}
+
+	if len(payload.Commits) == 0 {
+		return []RepositoryCommit{}, nil
+	}
+
+	commits := make([]RepositoryCommit, len(payload.Commits))
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(8)
+
+	for index, summary := range payload.Commits {
+		index := index
+		summary := summary
+
+		group.Go(func() error {
+			commit, err := c.getRepositoryCommit(groupCtx, token.Token, owner, repo, summary.SHA)
+			if err != nil {
+				return err
+			}
 			commits[index] = commit
 			return nil
 		})
@@ -450,13 +751,19 @@ func (c *AppClient) getRepositoryCommit(ctx context.Context, installationToken s
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			if attempt < maxAttempts && shouldRetryGitHubRequestError(ctx, err) {
+				if err := sleepWithContext(ctx, time.Duration(attempt)*500*time.Millisecond); err != nil {
+					return RepositoryCommit{}, err
+				}
+				continue
+			}
 			return RepositoryCommit{}, fmt.Errorf("request repository commit detail %s: %w", sha, err)
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			if attempt < maxAttempts && isRetryableGitHubStatus(resp.StatusCode) {
+			if retryDelay, shouldRetry := getGitHubRetryDelay(resp, attempt); attempt < maxAttempts && shouldRetry {
 				resp.Body.Close()
-				if err := sleepWithContext(ctx, time.Duration(attempt)*500*time.Millisecond); err != nil {
+				if err := sleepWithContext(ctx, retryDelay); err != nil {
 					return RepositoryCommit{}, err
 				}
 				continue
@@ -518,7 +825,88 @@ func (c *AppClient) getRepositoryCommit(ctx context.Context, installationToken s
 }
 
 func isRetryableGitHubStatus(statusCode int) bool {
-	return statusCode >= 500 && statusCode <= 599
+	return statusCode == http.StatusTooManyRequests || (statusCode >= 500 && statusCode <= 599)
+}
+
+func shouldRetryGitHubRequestError(ctx context.Context, err error) bool {
+	return ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+func getGitHubRetryDelay(resp *http.Response, attempt int) (time.Duration, bool) {
+	if resp == nil {
+		return 0, false
+	}
+
+	if retryAfter := parseRetryAfterHeader(resp.Header.Get("Retry-After")); retryAfter > 0 {
+		return retryAfter, true
+	}
+
+	if resp.StatusCode == http.StatusForbidden && isGitHubRateLimitResponse(resp) {
+		if resetDelay := parseRateLimitResetDelay(resp.Header.Get("X-RateLimit-Reset")); resetDelay > 0 {
+			return resetDelay, true
+		}
+		return 2 * time.Second, true
+	}
+
+	if isRetryableGitHubStatus(resp.StatusCode) {
+		if attempt < 1 {
+			attempt = 1
+		}
+		return time.Duration(attempt) * 500 * time.Millisecond, true
+	}
+
+	return 0, false
+}
+
+func parseRetryAfterHeader(raw string) time.Duration {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0
+	}
+
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+
+	if retryAt, err := http.ParseTime(value); err == nil {
+		delay := time.Until(retryAt)
+		if delay > 0 {
+			return delay
+		}
+	}
+
+	return 0
+}
+
+func parseRateLimitResetDelay(raw string) time.Duration {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0
+	}
+
+	epochSeconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+
+	delay := time.Until(time.Unix(epochSeconds, 0))
+	if delay > 0 {
+		return delay
+	}
+
+	return 0
+}
+
+func isGitHubRateLimitResponse(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+
+	if strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining")) == "0" {
+		return true
+	}
+
+	return resp.StatusCode == http.StatusTooManyRequests
 }
 
 func sleepWithContext(ctx context.Context, duration time.Duration) error {
@@ -540,6 +928,11 @@ func normalizeGitHubFileStatus(status string) string {
 	default:
 		return strings.TrimSpace(strings.ToLower(status))
 	}
+}
+
+func isZeroGitCommitSHA(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return trimmed != "" && strings.Trim(trimmed, "0") == ""
 }
 
 func loadPrivateKey(path string) (*rsa.PrivateKey, error) {
@@ -591,7 +984,12 @@ func decodeGitHubError(resp *http.Response) error {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return fmt.Errorf("github api status %d", resp.StatusCode)
+		return &APIError{
+			StatusCode:  resp.StatusCode,
+			Message:     fmt.Sprintf("github api status %d", resp.StatusCode),
+			RetryAfter:  parseRetryAfterHeader(resp.Header.Get("Retry-After")),
+			RateLimited: isGitHubRateLimitResponse(resp),
+		}
 	}
 
 	message := strings.TrimSpace(payload.Message)
@@ -599,9 +997,18 @@ func decodeGitHubError(resp *http.Response) error {
 		message = fmt.Sprintf("github api status %d", resp.StatusCode)
 	}
 
-	if strings.TrimSpace(payload.DocumentationURL) != "" {
-		return fmt.Errorf("%s (%s)", message, payload.DocumentationURL)
+	return &APIError{
+		StatusCode:       resp.StatusCode,
+		Message:          message,
+		DocumentationURL: strings.TrimSpace(payload.DocumentationURL),
+		RetryAfter:       maxDuration(parseRetryAfterHeader(resp.Header.Get("Retry-After")), parseRateLimitResetDelay(resp.Header.Get("X-RateLimit-Reset"))),
+		RateLimited:      isGitHubRateLimitResponse(resp),
 	}
+}
 
-	return fmt.Errorf("%s", message)
+func maxDuration(left time.Duration, right time.Duration) time.Duration {
+	if left > right {
+		return left
+	}
+	return right
 }
