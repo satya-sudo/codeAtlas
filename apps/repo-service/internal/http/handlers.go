@@ -698,6 +698,11 @@ func (h *Handler) handleRepositoryModules(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if moduleID, err := parseInt64(strings.TrimSpace(parts[0])); err == nil {
+		h.handleRepositoryModuleDetail(w, r, userID, repositoryID, moduleID)
+		return
+	}
+
 	switch parts[0] {
 	case "ownership":
 		h.handleRepositoryModuleOwnership(w, r, userID, repositoryID)
@@ -712,6 +717,36 @@ func (h *Handler) handleRepositoryModules(w http.ResponseWriter, r *http.Request
 			"error": "route not found",
 		})
 	}
+}
+
+func (h *Handler) handleRepositoryModuleDetail(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64, moduleID int64) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	module, err := h.repositoryRepo.BuildModuleDetailForRepository(r.Context(), userID, repositoryID, moduleID)
+	if err != nil {
+		if errors.Is(err, repository.ErrRepositoryNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "module not found",
+			})
+			return
+		}
+
+		h.logger.Error("build module detail", "repository_id", repositoryID, "module_id", moduleID, "user_id", userID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to build module detail",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"module": module,
+	})
 }
 
 func (h *Handler) handleRepositoryModuleOwnership(w http.ResponseWriter, r *http.Request, userID int64, repositoryID int64) {

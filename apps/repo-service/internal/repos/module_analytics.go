@@ -51,3 +51,25 @@ type ModuleBusFactor struct {
 	TopOwnerPercent    float64 `json:"top_owner_percent"`
 	Risk               string  `json:"risk"`
 }
+
+type ModuleCoChangePartner struct {
+	ModuleID         int64      `json:"module_id"`
+	ModuleName       string     `json:"module_name"`
+	PathPrefix       string     `json:"path_prefix"`
+	CoChangeCount    int        `json:"cochange_count"`
+	LastCochangedAt  *time.Time `json:"last_cochanged_at,omitempty"`
+}
+
+type ModuleDetail struct {
+	ModuleID           int64                  `json:"module_id"`
+	ModuleName         string                 `json:"module_name"`
+	PathPrefix         string                 `json:"path_prefix"`
+	BusFactor          int                    `json:"bus_factor"`
+	ActiveContributors int                    `json:"active_contributors"`
+	TopOwnerPercent    float64                `json:"top_owner_percent"`
+	Risk               string                 `json:"risk"`
+	Owners             []ModuleOwnershipEntry `json:"owners"`
+	Experts            []ModuleExpertiseEntry `json:"experts"`
+	Hotspots           []RepositoryHotspot    `json:"hotspots"`
+	CoChangePartners   []ModuleCoChangePartner `json:"cochange_partners"`
+}

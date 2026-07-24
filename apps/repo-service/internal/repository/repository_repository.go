@@ -1321,6 +1321,221 @@ func (r *RepositoryRepository) ListModuleBusFactorForRepository(ctx context.Cont
 	return modules, nil
 }
 
+func (r *RepositoryRepository) BuildModuleDetailForRepository(ctx context.Context, userID int64, repositoryID int64, moduleID int64) (repos.ModuleDetail, error) {
+	if _, err := r.FindRepositoryForUser(ctx, userID, repositoryID); err != nil {
+		return repos.ModuleDetail{}, err
+	}
+
+	const moduleQuery = `
+		SELECT
+			m.id,
+			m.name,
+			m.path_prefix,
+			COALESCE(mm.bus_factor, 0) AS bus_factor,
+			COALESCE(mm.active_contributors, 0) AS active_contributors,
+			COALESCE(mm.top_owner_percent::double precision, 0) AS top_owner_percent,
+			COALESCE(mm.risk, 'unknown') AS risk
+		FROM modules m
+		LEFT JOIN module_metrics mm ON mm.module_id = m.id
+		INNER JOIN user_repositories ur ON ur.repository_id = m.repository_id
+		WHERE ur.user_id = $1
+		  AND m.repository_id = $2
+		  AND m.id = $3
+	`
+
+	var detail repos.ModuleDetail
+	if err := r.db.QueryRow(ctx, moduleQuery, userID, repositoryID, moduleID).Scan(
+		&detail.ModuleID,
+		&detail.ModuleName,
+		&detail.PathPrefix,
+		&detail.BusFactor,
+		&detail.ActiveContributors,
+		&detail.TopOwnerPercent,
+		&detail.Risk,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return repos.ModuleDetail{}, ErrRepositoryNotFound
+		}
+		return repos.ModuleDetail{}, fmt.Errorf("query module detail: %w", err)
+	}
+
+	const ownershipQuery = `
+		SELECT
+			github_user_id,
+			username,
+			COALESCE(ownership_percent::double precision, 0) AS ownership_percent,
+			COALESCE(commit_count, 0) AS commit_count,
+			COALESCE(changes_count, 0) AS changes_count,
+			COALESCE(files_touched_count, 0) AS files_touched_count,
+			rank
+		FROM module_ownership
+		WHERE module_id = $1
+		ORDER BY rank ASC, username ASC
+	`
+
+	ownershipRows, err := r.db.Query(ctx, ownershipQuery, moduleID)
+	if err != nil {
+		return repos.ModuleDetail{}, fmt.Errorf("query module ownership detail: %w", err)
+	}
+	defer ownershipRows.Close()
+
+	detail.Owners = make([]repos.ModuleOwnershipEntry, 0)
+	for ownershipRows.Next() {
+		var owner repos.ModuleOwnershipEntry
+		if err := ownershipRows.Scan(
+			&owner.GitHubUserID,
+			&owner.Username,
+			&owner.OwnershipPercent,
+			&owner.CommitCount,
+			&owner.ChangesCount,
+			&owner.FilesTouchedCount,
+			&owner.Rank,
+		); err != nil {
+			return repos.ModuleDetail{}, fmt.Errorf("scan module ownership detail: %w", err)
+		}
+		detail.Owners = append(detail.Owners, owner)
+	}
+	if err := ownershipRows.Err(); err != nil {
+		return repos.ModuleDetail{}, fmt.Errorf("iterate module ownership detail: %w", err)
+	}
+
+	const expertiseQuery = `
+		SELECT
+			github_user_id,
+			username,
+			score,
+			raw_score,
+			commit_count,
+			files_touched_count,
+			recent_commit_count,
+			last_commit_at,
+			rank
+		FROM module_expertise
+		WHERE module_id = $1
+		ORDER BY rank ASC, username ASC
+	`
+
+	expertiseRows, err := r.db.Query(ctx, expertiseQuery, moduleID)
+	if err != nil {
+		return repos.ModuleDetail{}, fmt.Errorf("query module expertise detail: %w", err)
+	}
+	defer expertiseRows.Close()
+
+	detail.Experts = make([]repos.ModuleExpertiseEntry, 0)
+	for expertiseRows.Next() {
+		var expert repos.ModuleExpertiseEntry
+		if err := expertiseRows.Scan(
+			&expert.GitHubUserID,
+			&expert.Username,
+			&expert.Score,
+			&expert.RawScore,
+			&expert.CommitCount,
+			&expert.FilesTouchedCount,
+			&expert.RecentCommitCount,
+			&expert.LastCommitAt,
+			&expert.Rank,
+		); err != nil {
+			return repos.ModuleDetail{}, fmt.Errorf("scan module expertise detail: %w", err)
+		}
+		detail.Experts = append(detail.Experts, expert)
+	}
+	if err := expertiseRows.Err(); err != nil {
+		return repos.ModuleDetail{}, fmt.Errorf("iterate module expertise detail: %w", err)
+	}
+
+	const hotspotsQuery = `
+		SELECT
+			cf.path,
+			COUNT(DISTINCT cf.commit_id) AS commit_count,
+			COALESCE(SUM(cf.additions), 0) AS lines_added,
+			COALESCE(SUM(cf.deletions), 0) AS lines_deleted,
+			COALESCE(SUM(cf.changes), 0) AS churn
+		FROM commit_files cf
+		INNER JOIN user_repositories ur ON ur.repository_id = cf.repository_id
+		WHERE ur.user_id = $1
+		  AND cf.repository_id = $2
+		  AND ($3 = '.' OR cf.path = $3 OR cf.path LIKE $3 || '/%')
+		GROUP BY cf.path
+		ORDER BY churn DESC, commit_count DESC, cf.path ASC
+		LIMIT 8
+	`
+
+	hotspotRows, err := r.db.Query(ctx, hotspotsQuery, userID, repositoryID, detail.PathPrefix)
+	if err != nil {
+		return repos.ModuleDetail{}, fmt.Errorf("query module hotspots: %w", err)
+	}
+	defer hotspotRows.Close()
+
+	detail.Hotspots = make([]repos.RepositoryHotspot, 0, 8)
+	for hotspotRows.Next() {
+		var hotspot repos.RepositoryHotspot
+		if err := hotspotRows.Scan(
+			&hotspot.Path,
+			&hotspot.CommitCount,
+			&hotspot.LinesAdded,
+			&hotspot.LinesDeleted,
+			&hotspot.Churn,
+		); err != nil {
+			return repos.ModuleDetail{}, fmt.Errorf("scan module hotspot: %w", err)
+		}
+		detail.Hotspots = append(detail.Hotspots, hotspot)
+	}
+	if err := hotspotRows.Err(); err != nil {
+		return repos.ModuleDetail{}, fmt.Errorf("iterate module hotspots: %w", err)
+	}
+
+	const coChangeQuery = `
+		SELECT
+			CASE
+				WHEN mc.left_module_id = $3 THEN mc.right_module_id
+				ELSE mc.left_module_id
+			END AS module_id,
+			CASE
+				WHEN mc.left_module_id = $3 THEN mc.right_module_name
+				ELSE mc.left_module_name
+			END AS module_name,
+			CASE
+				WHEN mc.left_module_id = $3 THEN mc.right_path_prefix
+				ELSE mc.left_path_prefix
+			END AS path_prefix,
+			mc.cochange_count,
+			mc.last_cochanged_at
+		FROM module_cochange mc
+		INNER JOIN user_repositories ur ON ur.repository_id = mc.repository_id
+		WHERE ur.user_id = $1
+		  AND mc.repository_id = $2
+		  AND (mc.left_module_id = $3 OR mc.right_module_id = $3)
+		ORDER BY mc.cochange_count DESC, mc.last_cochanged_at DESC NULLS LAST, module_name ASC
+		LIMIT 8
+	`
+
+	coChangeRows, err := r.db.Query(ctx, coChangeQuery, userID, repositoryID, moduleID)
+	if err != nil {
+		return repos.ModuleDetail{}, fmt.Errorf("query module co-change partners: %w", err)
+	}
+	defer coChangeRows.Close()
+
+	detail.CoChangePartners = make([]repos.ModuleCoChangePartner, 0, 8)
+	for coChangeRows.Next() {
+		var partner repos.ModuleCoChangePartner
+		if err := coChangeRows.Scan(
+			&partner.ModuleID,
+			&partner.ModuleName,
+			&partner.PathPrefix,
+			&partner.CoChangeCount,
+			&partner.LastCochangedAt,
+		); err != nil {
+			return repos.ModuleDetail{}, fmt.Errorf("scan module co-change partner: %w", err)
+		}
+		detail.CoChangePartners = append(detail.CoChangePartners, partner)
+	}
+	if err := coChangeRows.Err(); err != nil {
+		return repos.ModuleDetail{}, fmt.Errorf("iterate module co-change partners: %w", err)
+	}
+
+	return detail, nil
+}
+
 func (r *RepositoryRepository) findActiveSyncRunForRepository(ctx context.Context, userID int64, repositoryID int64) (repos.SyncRun, bool, error) {
 	const query = `
 		SELECT
